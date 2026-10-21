@@ -1,0 +1,13 @@
+
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+alembic
+jinja2
+python-multipart
+argon2-cffi
+itsdangerous
+pydantic-settings
+pytest
+httpx
