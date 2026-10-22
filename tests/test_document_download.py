@@ -232,3 +232,65 @@ def test_revoked_permission_blocks_download_and_is_audited(
         )
     finally:
         db.close()
+
+def test_unshared_viewer_cannot_edit_document(setup_download_test):
+    from app.models import Document
+
+    client = setup_download_test["client"]
+    viewer_token = setup_download_test["viewer_token"]
+    document_id = setup_download_test["document_id"]
+
+    response = client.patch(
+        f"/documents/{document_id}",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+        json={
+             "title": "Unauthorized title change",
+             "category": "Unauthorized category",
+            },
+    )
+    assert response.status_code == 404
+
+    db = setup_download_test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title != "Unauthorized title change"
+    finally:
+        db.close()
+
+
+def test_unshared_viewer_cannot_delete_document(setup_download_test):
+    test = setup_download_test
+    from app.models import Document
+
+    client = test["client"]
+    viewer_token = test["viewer_token"]
+    document_id = test["document_id"]
+
+    response = client.delete(
+        f"/documents/{document_id}",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+    )
+
+    assert response.status_code == 404
+
+    db = test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+
+        denied_event = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.action == "DOCUMENT_DELETE",
+                AuditLog.resource_id == str(document_id),
+                AuditLog.outcome == "DENIED",
+            )
+            .first()
+        )
+
+        assert denied_event is not None, (
+            "Unauthorized deletion attempt should be audited."
+        )
+    finally:
+        db.close()
