@@ -13,19 +13,22 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Document, DocumentPermission, User
 from app.permissions import require_document_read, require_document_edit
 from app.audit import record_audit_event
-from pydantic import BaseModel, Field
+
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
+
 
 class DocumentUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     category: str = Field(min_length=1, max_length=100)
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STORAGE_DIR = BASE_DIR / "storage"
@@ -117,6 +120,23 @@ async def upload_document(
             stored_file.write(content)
 
         db.add(document)
+        db.flush()
+
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="DOCUMENT_UPLOAD",
+            resource_type="document",
+            resource_id=str(document.id),
+            outcome="SUCCESS",
+            details=(
+                f"Uploaded document titled: {document.title}; "
+                f"filename={document.original_filename}; "
+                f"size_bytes={document.size_bytes}"
+            ),
+        )
+
+        # Save the document and its audit entry together.
         db.commit()
         db.refresh(document)
 
@@ -195,6 +215,7 @@ def get_document_metadata(
     """Return metadata only when the user can read the document."""
     document = require_document_read(document_id, current_user, db)
     return document_response(document)
+
 
 @router.patch("/{document_id}")
 def update_document(
@@ -295,6 +316,7 @@ def delete_document(
         "message": "Document deleted successfully.",
         "document_id": document_id,
     }
+
 
 @router.get("/{document_id}/download")
 def download_document(
