@@ -96,6 +96,7 @@ def require_document_read(
     return document
 
 
+
 def require_document_edit(
     document_id: int,
     user: User,
@@ -103,16 +104,30 @@ def require_document_edit(
 ) -> Document:
     document = db.get(Document, document_id)
 
-    if document is None or not can_edit_document(
-        document, user, db
-    ):
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found.",
+        )
+
+    if not can_edit_document(document, user, db):
+        record_audit_event(
+            db=db,
+            actor_id=user.id,
+            action="DOCUMENT_UPDATE",
+            resource_type="DOCUMENT",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details="Unauthorized document edit attempt.",
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=404,
             detail="Document not found.",
         )
 
     return document
-
 
 @router.post("/{document_id}/permissions")
 def grant_document_permission(

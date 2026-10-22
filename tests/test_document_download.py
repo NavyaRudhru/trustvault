@@ -153,6 +153,7 @@ def test_unshared_viewer_cannot_download_and_denial_is_audited(
     finally:
         db.close()
 
+
 def test_revoked_permission_blocks_download_and_is_audited(
     setup_download_test,
 ):
@@ -193,7 +194,7 @@ def test_revoked_permission_blocks_download_and_is_audited(
     )
     assert revoke_response.status_code == 200
 
-    # 4. The same viewer is denied immediately after revocation.
+    # 4. The viewer is denied immediately after revocation.
     denied_response = client.get(
         f"/documents/{document_id}/download",
         headers=viewer_headers,
@@ -233,36 +234,51 @@ def test_revoked_permission_blocks_download_and_is_audited(
     finally:
         db.close()
 
-def test_unshared_viewer_cannot_edit_document(setup_download_test):
-    from app.models import Document
 
-    client = setup_download_test["client"]
-    viewer_token = setup_download_test["viewer_token"]
-    document_id = setup_download_test["document_id"]
+def test_unshared_viewer_cannot_edit_document(setup_download_test):
+    test = setup_download_test
+    client = test["client"]
+    viewer_token = test["viewer_token"]
+    document_id = test["document_id"]
 
     response = client.patch(
         f"/documents/{document_id}",
         headers={"Authorization": f"Bearer {viewer_token}"},
         json={
-             "title": "Unauthorized title change",
-             "category": "Unauthorized category",
-            },
+            "title": "Unauthorized title change",
+            "category": "Unauthorized category",
+        },
     )
     assert response.status_code == 404
 
-    db = setup_download_test["TestSession"]()
+    db = test["TestSession"]()
     try:
+        # Verify the document was not changed.
         document = db.get(Document, document_id)
         assert document is not None
         assert document.title != "Unauthorized title change"
+        assert document.category != "Unauthorized category"
+
+        # Verify the denied edit was recorded in the audit log.
+        denied_event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="DOCUMENT_UPDATE",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .first()
+        )
+
+        assert denied_event is not None, (
+            "Unauthorized document edit must be recorded in the audit log."
+        )
     finally:
         db.close()
 
 
 def test_unshared_viewer_cannot_delete_document(setup_download_test):
     test = setup_download_test
-    from app.models import Document
-
     client = test["client"]
     viewer_token = test["viewer_token"]
     document_id = test["document_id"]
@@ -276,15 +292,17 @@ def test_unshared_viewer_cannot_delete_document(setup_download_test):
 
     db = test["TestSession"]()
     try:
+        # Verify the document still exists.
         document = db.get(Document, document_id)
         assert document is not None
 
+        # Verify the denied deletion was audited.
         denied_event = (
             db.query(AuditLog)
-            .filter(
-                AuditLog.action == "DOCUMENT_DELETE",
-                AuditLog.resource_id == str(document_id),
-                AuditLog.outcome == "DENIED",
+            .filter_by(
+                action="DOCUMENT_DELETE",
+                resource_id=str(document_id),
+                outcome="DENIED",
             )
             .first()
         )
