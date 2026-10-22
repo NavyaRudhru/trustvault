@@ -1,4 +1,3 @@
-
 import uuid
 from pathlib import Path
 
@@ -325,17 +324,56 @@ def download_document(
     db: Session = Depends(get_db),
 ):
     """Download a document only after checking read permission."""
-    document = require_document_read(document_id, current_user, db)
+    try:
+        document = require_document_read(document_id, current_user, db)
+    except HTTPException as exc:
+        # Record denied attempts, including attempts for nonexistent documents.
+        if exc.status_code in (403, 404):
+            try:
+                record_audit_event(
+                    db=db,
+                    actor_id=current_user.id,
+                    action="DOCUMENT_DOWNLOAD",
+                    resource_type="document",
+                    resource_id=str(document_id),
+                    outcome="DENIED",
+                    details="Download denied by document read authorization.",
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+        raise
 
     # Resolve and verify the path stays inside private storage.
     storage_root = STORAGE_DIR.resolve()
     storage_path = (storage_root / document.storage_key).resolve()
 
     if storage_path.parent != storage_root or not storage_path.is_file():
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="DOCUMENT_DOWNLOAD",
+            resource_type="document",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details="Download denied because the stored file is missing or its path is invalid.",
+        )
+        db.commit()
         raise HTTPException(
             status_code=404,
             detail="Document file not found.",
         )
+
+    record_audit_event(
+        db=db,
+        actor_id=current_user.id,
+        action="DOCUMENT_DOWNLOAD",
+        resource_type="document",
+        resource_id=str(document_id),
+        outcome="SUCCESS",
+        details=f"Downloaded document titled: {document.title}",
+    )
+    db.commit()
 
     return FileResponse(
         path=storage_path,
@@ -346,3 +384,4 @@ def download_document(
             "Cache-Control": "no-store",
         },
     )
+
