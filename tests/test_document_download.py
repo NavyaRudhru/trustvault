@@ -152,3 +152,83 @@ def test_unshared_viewer_cannot_download_and_denial_is_audited(
         assert event.actor_id is not None
     finally:
         db.close()
+
+def test_revoked_permission_blocks_download_and_is_audited(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # 1. Owner grants read access to the viewer.
+    grant_response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=owner_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": False,
+        },
+    )
+    assert grant_response.status_code == 200
+
+    # 2. Viewer can download while permission exists.
+    allowed_response = client.get(
+        f"/documents/{document_id}/download",
+        headers=viewer_headers,
+    )
+    assert allowed_response.status_code == 200
+
+    # 3. Owner revokes the viewer's permission.
+    revoke_response = client.delete(
+        f"/documents/{document_id}/permissions/download_viewer",
+        headers=owner_headers,
+    )
+    assert revoke_response.status_code == 200
+
+    # 4. The same viewer is denied immediately after revocation.
+    denied_response = client.get(
+        f"/documents/{document_id}/download",
+        headers=viewer_headers,
+    )
+    assert denied_response.status_code == 404
+
+    # 5. Verify grant, revoke, and denied-download audit entries.
+    db = test["TestSession"]()
+    try:
+        events = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.resource_id == str(document_id),
+                AuditLog.action.in_(
+                    [
+                        "PERMISSION_GRANT",
+                        "PERMISSION_REVOKE",
+                        "DOCUMENT_DOWNLOAD",
+                    ]
+                ),
+            )
+            .all()
+        )
+
+        assert any(
+            e.action == "PERMISSION_GRANT" and e.outcome == "SUCCESS"
+            for e in events
+        )
+        assert any(
+            e.action == "PERMISSION_REVOKE" and e.outcome == "SUCCESS"
+            for e in events
+        )
+        assert any(
+            e.action == "DOCUMENT_DOWNLOAD" and e.outcome == "DENIED"
+            for e in events
+        )
+    finally:
+        db.close()
