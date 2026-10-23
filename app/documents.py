@@ -1,4 +1,3 @@
-
 import uuid
 from pathlib import Path
 
@@ -463,6 +462,7 @@ def download_document(
         )
     except HTTPException as exc:
         if exc.status_code in (403, 404):
+            # Do not silently allow a denied request to go unaudited.
             try:
                 record_audit_event(
                     db=db,
@@ -478,12 +478,18 @@ def download_document(
                 db.commit()
             except Exception:
                 db.rollback()
+                raise HTTPException(
+                    status_code=500,
+                    detail="Download denial could not be audited.",
+                ) from None
 
         raise
 
     storage_root = STORAGE_DIR.resolve()
     storage_path = (storage_root / document.storage_key).resolve()
 
+    # Ensure the resolved file stays directly inside the private storage
+    # directory and exists before returning it.
     if (
         storage_path.parent != storage_root
         or not storage_path.is_file()
@@ -501,13 +507,17 @@ def download_document(
             db.commit()
         except Exception:
             db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail="Download failure could not be audited.",
+            ) from None
 
         raise HTTPException(
             status_code=404,
             detail="Document file not found.",
         )
 
-    # Fail closed if the successful download cannot be audited.
+    # Fail closed if the authorized download cannot be audited.
     try:
         record_audit_event(
             db=db,
@@ -516,10 +526,9 @@ def download_document(
             resource_type="document",
             resource_id=str(document.id),
             outcome="SUCCESS",
-            details=f"Downloaded document titled: {document.title}",
+            details=f"Download authorized for document: {document.title}",
         )
         db.commit()
-
     except Exception:
         db.rollback()
         raise HTTPException(
