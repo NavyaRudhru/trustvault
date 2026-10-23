@@ -30,6 +30,9 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 ALLOWED_EXTENSIONS = {".pdf", ".txt", ".png", ".jpg", ".jpeg"}
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+JPEG_SIGNATURE = b"\xff\xd8\xff"
+
 
 class DocumentUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
@@ -41,7 +44,7 @@ def audit_rejected_upload(
     current_user: User,
     reason: str,
 ) -> None:
-    """Record a rejected upload attempt."""
+    """Attempt to record a rejected upload."""
     try:
         record_audit_event(
             db=db,
@@ -55,6 +58,32 @@ def audit_rejected_upload(
         db.commit()
     except Exception:
         db.rollback()
+
+
+def validate_file_content(extension: str, content: bytes) -> bool:
+    """Check basic file signatures and reject obvious extension mismatches."""
+    if not content:
+        return False
+
+    if extension == ".pdf":
+        return content.startswith(b"%PDF-")
+
+    if extension == ".png":
+        return content.startswith(PNG_SIGNATURE)
+
+    if extension in {".jpg", ".jpeg"}:
+        return content.startswith(JPEG_SIGNATURE)
+
+    if extension == ".txt":
+        if b"\x00" in content:
+            return False
+        try:
+            content.decode("utf-8")
+            return True
+        except UnicodeDecodeError:
+            return False
+
+    return False
 
 
 def document_response(document: Document) -> dict:
@@ -71,103 +100,90 @@ def document_response(document: Document) -> dict:
 
 
 @router.post("/", status_code=201)
-async def upload_document(
+def upload_document(
     title: str = Form(..., min_length=1, max_length=255),
-    category: str = Form("General", max_length=100),
+    category: str = Form(..., min_length=1, max_length=100),
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Validate and save an uploaded document in private storage."""
+    """Validate, store, and audit a document upload."""
 
-    raw_filename = (file.filename or "").replace("\\", "/")
-    original_name = Path(raw_filename).name
-    extension = Path(original_name).suffix.lower()
+    storage_path = None
+    file_created = False
+    transaction_committed = False
 
     try:
-        # Validate filename and extension.
+        # Validate form values.
+        title = title.strip()
+        category = category.strip()
+
+        if not title or not category:
+            raise HTTPException(
+                status_code=400,
+                detail="Title and category cannot be empty.",
+            )
+
+        # Normalize Windows and Unix-style filenames.
+        raw_filename = (file.filename or "").replace("\\", "/")
+        original_name = Path(raw_filename).name
+
         if (
             not original_name
             or original_name in {".", ".."}
-            or extension not in ALLOWED_EXTENSIONS
+            or "\x00" in original_name
         ):
-            audit_rejected_upload(
-                db, current_user, "Unsupported file type or filename."
-            )
             raise HTTPException(
                 status_code=400,
-                detail="Unsupported file type.",
+                detail="Invalid filename.",
             )
 
-        # Reject whitespace-only titles and invalid categories.
-        if not title.strip():
-            audit_rejected_upload(
-                db, current_user, "Document title cannot be empty."
-            )
+        # Validate the extension.
+        extension = Path(original_name).suffix.lower()
+
+        if extension not in ALLOWED_EXTENSIONS:
             raise HTTPException(
                 status_code=400,
-                detail="Document title cannot be empty.",
+                detail="File type is not allowed.",
             )
 
-        if len(category) > 100:
-            audit_rejected_upload(
-                db, current_user, "Category exceeds the allowed length."
-            )
-            raise HTTPException(
-                status_code=400,
-                detail="Category is too long.",
-            )
-
-        # Read at most one byte above the upload limit.
-        content = await file.read(MAX_UPLOAD_BYTES + 1)
+        # Read at most one byte beyond the limit.
+        # This avoids loading an arbitrarily large upload into memory.
+        content = file.file.read(MAX_UPLOAD_BYTES + 1)
 
         if not content:
-            audit_rejected_upload(
-                db, current_user, "Empty files are not allowed."
-            )
             raise HTTPException(
                 status_code=400,
                 detail="Empty files are not allowed.",
             )
 
         if len(content) > MAX_UPLOAD_BYTES:
-            audit_rejected_upload(
-                db, current_user, "File exceeds the 10 MB limit."
-            )
             raise HTTPException(
                 status_code=413,
                 detail="File exceeds the 10 MB limit.",
             )
 
-        # Check basic file signatures. These checks do not fully validate
-        # or scan the contents of a file.
-        expected_signatures = {
-            ".pdf": content.startswith(b"%PDF-"),
-            ".png": content.startswith(b"\x89PNG\r\n\x1a\n"),
-            ".jpg": content.startswith(b"\xff\xd8\xff"),
-            ".jpeg": content.startswith(b"\xff\xd8\xff"),
-            ".txt": b"\x00" not in content,
-        }
-
-        if not expected_signatures[extension]:
-            audit_rejected_upload(
-                db,
-                current_user,
-                "File content does not match its extension.",
-            )
+        # Check the file signature/content.
+        if not validate_file_content(extension, content):
             raise HTTPException(
                 status_code=400,
-                detail="File content does not match the allowed file type.",
+                detail="File content does not match its extension.",
             )
 
-        # Generate a server-controlled storage name.
+        # Store files under generated names, never user-supplied paths.
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        storage_key = uuid.uuid4().hex
+
+        storage_key = f"{uuid.uuid4().hex}{extension}"
         storage_path = STORAGE_DIR / storage_key
 
+        with storage_path.open("xb") as stored_file:
+            file_created = True
+            stored_file.write(content)
+
+        # Create the document record.
         document = Document(
-            title=title.strip(),
-            category=category.strip() or "General",
+            title=title,
+            category=category,
             original_filename=original_name,
             storage_key=storage_key,
             content_type=file.content_type or "application/octet-stream",
@@ -175,55 +191,66 @@ async def upload_document(
             owner_id=current_user.id,
         )
 
-        file_created = False
+        db.add(document)
+        db.flush()
+        db.refresh(document)
 
-        try:
-            # Exclusive creation avoids overwriting an existing file.
-            with storage_path.open("xb") as stored_file:
-                file_created = True
-                stored_file.write(content)
+        # Record success in the same database transaction.
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="DOCUMENT_UPLOAD",
+            resource_type="document",
+            resource_id=document.id,
+            outcome="SUCCESS",
+            details=f"Uploaded document: {original_name}",
+        )
 
-            db.add(document)
-            db.flush()
-
-            record_audit_event(
-                db=db,
-                actor_id=current_user.id,
-                action="DOCUMENT_UPLOAD",
-                resource_type="document",
-                resource_id=str(document.id),
-                outcome="SUCCESS",
-                details=(
-                    f"Uploaded document titled: {document.title}; "
-                    f"filename={document.original_filename}; "
-                    f"size_bytes={document.size_bytes}"
-                ),
-            )
-
-            # Save the document and audit entry in one transaction.
-            db.commit()
-            db.refresh(document)
-
-        except Exception:
-            db.rollback()
-
-            # Remove a partially written file if the database operation fails.
-            if file_created:
-                try:
-                    storage_path.unlink(missing_ok=True)
-                except OSError:
-                    # Avoid exposing filesystem details to the caller.
-                    pass
-
-            raise HTTPException(
-                status_code=500,
-                detail="Document upload failed.",
-            ) from None
+        db.commit()
+        transaction_committed = True
 
         return document_response(document)
 
+    except HTTPException as exc:
+        db.rollback()
+
+        # Remove a file created by this failed upload.
+        if file_created and storage_path is not None:
+            try:
+                storage_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        audit_rejected_upload(db, current_user, str(exc.detail))
+        raise
+
+    except Exception:
+        db.rollback()
+
+        # Do not delete a file after the DB transaction has committed.
+        if (
+            not transaction_committed
+            and file_created
+            and storage_path is not None
+        ):
+            try:
+                storage_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        audit_rejected_upload(
+            db,
+            current_user,
+            "Upload failed during storage or database processing.",
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Document upload failed.",
+        ) from None
+
     finally:
-        await file.close()
+        file.file.close()
 
 
 @router.get("/")
@@ -282,7 +309,7 @@ def get_document_metadata(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return metadata only if the user has read permission."""
+    """Return metadata only when the user has read permission."""
     document = require_document_read(document_id, current_user, db)
     return document_response(document)
 
@@ -294,11 +321,14 @@ def update_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update document metadata only if the user has edit permission."""
+    """Update metadata only when the user has edit permission."""
 
     document = require_document_edit(document_id, current_user, db)
 
-    if not data.title.strip() or not data.category.strip():
+    title = data.title.strip()
+    category = data.category.strip()
+
+    if not title or not category:
         raise HTTPException(
             status_code=400,
             detail="Title and category cannot be empty.",
@@ -307,8 +337,8 @@ def update_document(
     old_title = document.title
 
     try:
-        document.title = data.title.strip()
-        document.category = data.category.strip()
+        document.title = title
+        document.category = category
 
         record_audit_event(
             db=db,
@@ -317,10 +347,7 @@ def update_document(
             resource_type="document",
             resource_id=str(document.id),
             outcome="SUCCESS",
-            details=(
-                f"Updated document {document.id}; "
-                f"previous title={old_title}"
-            ),
+            details=f"Updated document {document.id}; previous title={old_title}",
         )
 
         db.commit()
@@ -342,21 +369,25 @@ def delete_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Allow only the document owner to delete a document."""
+    """Only the owner can delete a document."""
 
     document = db.get(Document, document_id)
 
     if document is None or document.owner_id != current_user.id:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
-            action="DOCUMENT_DELETE",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details="Document deletion denied: requester is not the owner.",
-        )
-        db.commit()
+        try:
+            record_audit_event(
+                db=db,
+                actor_id=current_user.id,
+                action="DOCUMENT_DELETE",
+                resource_type="document",
+                resource_id=str(document_id),
+                outcome="DENIED",
+                details="Document deletion denied: requester is not the owner.",
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+
         raise HTTPException(status_code=404, detail="Document not found.")
 
     storage_root = STORAGE_DIR.resolve()
@@ -393,12 +424,12 @@ def delete_document(
             detail="Document deletion failed.",
         ) from None
 
-    # Remove the physical file after the database transaction succeeds.
+    # Delete the physical file only after the DB transaction succeeds.
     if storage_path.is_file():
         try:
             storage_path.unlink()
         except OSError:
-            # The database record is gone; monitor for orphaned files.
+            # A separate cleanup task should handle orphaned files.
             pass
 
     return {
@@ -413,7 +444,7 @@ def download_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Download a document only after checking read permission."""
+    """Download only after verifying document read permission."""
 
     try:
         document = require_document_read(
@@ -439,25 +470,30 @@ def download_document(
     storage_root = STORAGE_DIR.resolve()
     storage_path = (storage_root / document.storage_key).resolve()
 
-    if storage_path.parent != storage_root or not storage_path.is_file():
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
-            action="DOCUMENT_DOWNLOAD",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Download denied because the stored file is missing "
-                "or its path is invalid."
-            ),
-        )
-        db.commit()
+    if (
+        storage_path.parent != storage_root
+        or not storage_path.is_file()
+    ):
+        try:
+            record_audit_event(
+                db=db,
+                actor_id=current_user.id,
+                action="DOCUMENT_DOWNLOAD",
+                resource_type="document",
+                resource_id=str(document_id),
+                outcome="DENIED",
+                details="Stored file is missing or its path is invalid.",
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+
         raise HTTPException(
             status_code=404,
             detail="Document file not found.",
         )
 
+    # Fail closed if the successful download cannot be audited.
     try:
         record_audit_event(
             db=db,

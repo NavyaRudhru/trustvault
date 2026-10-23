@@ -190,3 +190,57 @@ def test_upload_normalizes_windows_style_filename(upload_test_env):
 
     assert response.status_code == 201
     assert response.json()["original_filename"] == "sample.txt"
+
+
+def test_storage_write_failure_returns_error_and_creates_no_document(
+    upload_test_env, monkeypatch
+):
+    from pathlib import Path
+    from app.models import Document
+
+    client, db, token, _user = upload_test_env
+    storage_dir = Path(__import__(
+        "app.documents", fromlist=["STORAGE_DIR"]
+    ).STORAGE_DIR)
+
+    def fail_open(*args, **kwargs):
+        raise OSError("Simulated storage failure")
+
+    monkeypatch.setattr(Path, "open", fail_open)
+
+    response = client.post(
+        "/documents/",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Storage failure test", "category": "General"},
+        files={"file": ("sample.txt", b"Valid text content", "text/plain")},
+    )
+
+    assert response.status_code == 500
+    assert db.query(Document).count() == 0
+    assert not list(storage_dir.glob("*"))
+
+
+def test_database_commit_failure_removes_uploaded_file(
+    upload_test_env, monkeypatch
+):
+    from app.documents import STORAGE_DIR
+    from app.models import Document
+
+    client, db, token, _user = upload_test_env
+
+    def fail_commit():
+        raise RuntimeError("Simulated database failure")
+
+    monkeypatch.setattr(db, "commit", fail_commit)
+
+    response = client.post(
+        "/documents/",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Database failure test", "category": "General"},
+        files={"file": ("sample.txt", b"Valid text content", "text/plain")},
+    )
+
+    assert response.status_code == 500
+    assert not list(STORAGE_DIR.glob("*"))
+    assert db.query(Document).count() == 0
+
