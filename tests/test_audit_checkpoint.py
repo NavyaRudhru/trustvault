@@ -1,23 +1,70 @@
 
-import pytest
+import json
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.audit import record_audit_event
 from app.audit_checkpoint import (
     sign_checkpoint,
     verify_checkpoint_signature,
     create_checkpoint,
     verify_checkpoint,
+    save_checkpoint,
+    load_checkpoint,
+    verify_checkpoint_against_audit_log,
+    verify_full_chain_against_checkpoint,
 )
+from app.models import Base, AuditLog
 
+
+# --------------------------------------------------
+# Shared test database fixture
+# --------------------------------------------------
+
+@pytest.fixture
+def audit_db():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    TestSession = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+    )
+
+    Base.metadata.create_all(bind=engine)
+    db = TestSession()
+
+    try:
+        yield db
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+# --------------------------------------------------
+# Checkpoint signature tests
+# --------------------------------------------------
 
 def test_checkpoint_signature_is_valid(monkeypatch):
     monkeypatch.setenv(
         "AUDIT_CHECKPOINT_SECRET",
         "test-secret-key-with-at-least-32-characters",
     )
-    checkpoint = "audit_id=10;entry_hash=abc123"
-    signature = sign_checkpoint(checkpoint)
 
-    assert verify_checkpoint_signature(checkpoint, signature) is True
+    checkpoint_data = "audit_id=10;entry_hash=abc123"
+    signature = sign_checkpoint(checkpoint_data)
+
+    assert verify_checkpoint_signature(
+        checkpoint_data, signature
+    ) is True
 
 
 def test_modified_checkpoint_signature_is_rejected(monkeypatch):
@@ -25,8 +72,9 @@ def test_modified_checkpoint_signature_is_rejected(monkeypatch):
         "AUDIT_CHECKPOINT_SECRET",
         "test-secret-key-with-at-least-32-characters",
     )
-    checkpoint = "audit_id=10;entry_hash=abc123"
-    signature = sign_checkpoint(checkpoint)
+
+    checkpoint_data = "audit_id=10;entry_hash=abc123"
+    signature = sign_checkpoint(checkpoint_data)
 
     assert verify_checkpoint_signature(
         "audit_id=10;entry_hash=changed",
@@ -39,33 +87,54 @@ def test_modified_signature_is_rejected(monkeypatch):
         "AUDIT_CHECKPOINT_SECRET",
         "test-secret-key-with-at-least-32-characters",
     )
-    checkpoint = "audit_id=10;entry_hash=abc123"
+
+    checkpoint_data = "audit_id=10;entry_hash=abc123"
 
     assert verify_checkpoint_signature(
-        checkpoint, "invalid-signature"
+        checkpoint_data, "invalid-signature"
     ) is False
 
 
 def test_missing_secret_is_rejected(monkeypatch):
-    monkeypatch.delenv("AUDIT_CHECKPOINT_SECRET", raising=False)
+    monkeypatch.delenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        raising=False,
+    )
 
-    with pytest.raises(RuntimeError, match="AUDIT_CHECKPOINT_SECRET"):
+    with pytest.raises(
+        RuntimeError,
+        match="AUDIT_CHECKPOINT_SECRET",
+    ):
         sign_checkpoint("audit_id=10;entry_hash=abc123")
 
 
 def test_short_secret_is_rejected(monkeypatch):
-    monkeypatch.setenv("AUDIT_CHECKPOINT_SECRET", "too-short")
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "too-short",
+    )
 
-    with pytest.raises(RuntimeError, match="at least 32 characters"):
+    with pytest.raises(
+        RuntimeError,
+        match="at least 32 characters",
+    ):
         sign_checkpoint("audit_id=10;entry_hash=abc123")
 
+
+# --------------------------------------------------
+# Checkpoint creation and validation tests
+# --------------------------------------------------
 
 def test_created_checkpoint_is_valid(monkeypatch):
     monkeypatch.setenv(
         "AUDIT_CHECKPOINT_SECRET",
         "test-secret-key-with-at-least-32-characters",
     )
-    checkpoint = create_checkpoint(audit_id=10, entry_hash="abc123")
+
+    checkpoint = create_checkpoint(
+        audit_id=10,
+        entry_hash="abc123",
+    )
 
     assert checkpoint["audit_id"] == 10
     assert checkpoint["entry_hash"] == "abc123"
@@ -77,7 +146,219 @@ def test_modified_checkpoint_is_rejected(monkeypatch):
         "AUDIT_CHECKPOINT_SECRET",
         "test-secret-key-with-at-least-32-characters",
     )
-    checkpoint = create_checkpoint(audit_id=10, entry_hash="abc123")
+
+    checkpoint = create_checkpoint(
+        audit_id=10,
+        entry_hash="abc123",
+    )
     checkpoint["entry_hash"] = "tampered_hash"
 
     assert verify_checkpoint(checkpoint) is False
+
+
+# --------------------------------------------------
+# Checkpoint file storage tests
+# --------------------------------------------------
+
+def test_checkpoint_can_be_saved_and_loaded(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-secret-key-with-at-least-32-characters",
+    )
+
+    checkpoint = create_checkpoint(
+        audit_id=10,
+        entry_hash="abc123",
+    )
+
+    path = save_checkpoint(checkpoint, str(tmp_path))
+    loaded = load_checkpoint(str(tmp_path))
+
+    assert path.exists()
+    assert loaded is not None
+    assert loaded["audit_id"] == 10
+    assert loaded["entry_hash"] == "abc123"
+    assert verify_checkpoint(loaded) is True
+
+
+def test_missing_saved_checkpoint_returns_none(tmp_path):
+    assert load_checkpoint(str(tmp_path)) is None
+
+
+def test_tampered_saved_checkpoint_is_rejected(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-secret-key-with-at-least-32-characters",
+    )
+
+    checkpoint = create_checkpoint(
+        audit_id=10,
+        entry_hash="abc123",
+    )
+    path = save_checkpoint(checkpoint, str(tmp_path))
+
+    saved_data = json.loads(
+        path.read_text(encoding="utf-8")
+    )
+    saved_data["entry_hash"] = "tampered_hash"
+
+    path.write_text(
+        json.dumps(saved_data),
+        encoding="utf-8",
+    )
+
+    assert load_checkpoint(str(tmp_path)) is None
+
+
+# --------------------------------------------------
+# Checkpoint and database verification tests
+# --------------------------------------------------
+
+def test_checkpoint_matches_database_entry(
+    monkeypatch, audit_db
+):
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-secret-key-with-at-least-32-characters",
+    )
+
+    entry = AuditLog(
+        action="DOCUMENT_UPLOAD",
+        resource_type="document",
+        resource_id="1",
+        outcome="SUCCESS",
+        details="Test upload",
+        previous_hash=None,
+        entry_hash="abc123",
+    )
+
+    audit_db.add(entry)
+    audit_db.commit()
+    audit_db.refresh(entry)
+
+    checkpoint = create_checkpoint(
+        audit_id=entry.id,
+        entry_hash=entry.entry_hash,
+    )
+
+    assert verify_checkpoint_against_audit_log(
+        checkpoint, audit_db
+    ) is True
+
+
+def test_checkpoint_mismatching_database_hash_is_rejected(
+    monkeypatch, audit_db
+):
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-secret-key-with-at-least-32-characters",
+    )
+
+    entry = AuditLog(
+        action="DOCUMENT_UPLOAD",
+        resource_type="document",
+        resource_id="1",
+        outcome="SUCCESS",
+        details="Test upload",
+        previous_hash=None,
+        entry_hash="actual_hash",
+    )
+
+    audit_db.add(entry)
+    audit_db.commit()
+    audit_db.refresh(entry)
+
+    checkpoint = create_checkpoint(
+        audit_id=entry.id,
+        entry_hash="different_hash",
+    )
+
+    assert verify_checkpoint_against_audit_log(
+        checkpoint, audit_db
+    ) is False
+
+
+# --------------------------------------------------
+# Full audit-chain verification tests
+# --------------------------------------------------
+
+def test_full_chain_matches_latest_checkpoint(
+    monkeypatch, audit_db
+):
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-secret-key-with-at-least-32-characters",
+    )
+
+    record_audit_event(
+        db=audit_db,
+        action="DOCUMENT_UPLOAD",
+        resource_type="document",
+        resource_id="1",
+        outcome="SUCCESS",
+        details="First event",
+    )
+    audit_db.commit()
+
+    latest = record_audit_event(
+        db=audit_db,
+        action="DOCUMENT_DOWNLOAD",
+        resource_type="document",
+        resource_id="1",
+        outcome="SUCCESS",
+        details="Second event",
+    )
+    audit_db.commit()
+    audit_db.refresh(latest)
+
+    checkpoint = create_checkpoint(
+        audit_id=latest.id,
+        entry_hash=latest.entry_hash,
+    )
+
+    assert verify_full_chain_against_checkpoint(
+        checkpoint, audit_db
+    ) is True
+
+
+def test_full_chain_rejects_checkpoint_for_old_entry(
+    monkeypatch, audit_db
+):
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-secret-key-with-at-least-32-characters",
+    )
+
+    first = record_audit_event(
+        db=audit_db,
+        action="DOCUMENT_UPLOAD",
+        resource_type="document",
+        resource_id="1",
+        outcome="SUCCESS",
+        details="First event",
+    )
+    audit_db.commit()
+    audit_db.refresh(first)
+
+    checkpoint = create_checkpoint(
+        audit_id=first.id,
+        entry_hash=first.entry_hash,
+    )
+
+    record_audit_event(
+        db=audit_db,
+        action="DOCUMENT_DOWNLOAD",
+        resource_type="document",
+        resource_id="1",
+        outcome="SUCCESS",
+        details="Second event",
+    )
+    audit_db.commit()
+
+    assert verify_full_chain_against_checkpoint(
+        checkpoint, audit_db
+    ) is False
