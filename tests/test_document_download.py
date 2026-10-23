@@ -833,3 +833,77 @@ def test_revoked_edit_permission_blocks_updates_immediately(
         assert event is not None
     finally:
         db.close()
+
+
+def test_non_owner_cannot_revoke_permission_and_attempt_is_audited(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # Owner grants read access to the viewer.
+    grant_response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=owner_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": False,
+        },
+    )
+    assert grant_response.status_code == 200
+
+    # Viewer attempts to revoke their own permission.
+    revoke_response = client.delete(
+        f"/documents/{document_id}/permissions/download_viewer",
+        headers=viewer_headers,
+    )
+    assert revoke_response.status_code == 404
+
+    db = test["TestSession"]()
+    try:
+        from app.models import DocumentPermission
+
+        viewer = (
+            db.query(User)
+            .filter_by(username="download_viewer")
+            .first()
+        )
+        assert viewer is not None
+
+        # The permission must still exist after the denied attempt.
+        permission = (
+            db.query(DocumentPermission)
+            .filter_by(
+                document_id=document_id,
+                user_id=viewer.id,
+            )
+            .first()
+        )
+        assert permission is not None
+        assert permission.can_read is True
+
+        # The denied revocation attempt must be audited.
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="PERMISSION_REVOKE",
+                resource_type="document",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert event is not None
+        assert event.actor_id == viewer.id
+    finally:
+        db.close()
