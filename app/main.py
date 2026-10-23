@@ -23,7 +23,7 @@ from app.schemas import (
     UserResponse,
 )
 from app.security import hash_password, verify_password
-from app.audit import verify_audit_chain
+from app.audit import record_audit_event, verify_audit_chain
 from app.audit_checkpoint import load_checkpoint, verify_full_chain_against_checkpoint
 
 app = FastAPI(
@@ -153,8 +153,18 @@ def login(
     username = data.username.strip()
     client_ip = request.client.host if request.client else "unknown"
 
-    # Block further attempts after five failures in the window.
+    # Record attempts blocked by the rate limiter.
     if is_login_rate_limited(client_ip, username):
+        record_audit_event(
+            db=db,
+            action="login",
+            resource_type="authentication",
+            outcome="DENIED",
+            details="rate_limit_exceeded",
+            ip_address=client_ip,
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed login attempts. Try again later.",
@@ -172,6 +182,17 @@ def login(
     ):
         record_failed_login(client_ip, username)
 
+        record_audit_event(
+            db=db,
+            action="login",
+            resource_type="authentication",
+            outcome="DENIED",
+            actor_id=user.id if user is not None else None,
+            details="invalid_credentials_or_inactive_account",
+            ip_address=client_ip,
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password.",
@@ -180,7 +201,19 @@ def login(
 
     clear_failed_logins(client_ip, username)
 
+    record_audit_event(
+        db=db,
+        action="login",
+        resource_type="authentication",
+        outcome="SUCCESS",
+        actor_id=user.id,
+        details="login_successful",
+        ip_address=client_ip,
+    )
+    db.commit()
+
     return TokenResponse(access_token=create_access_token(user.id))
+
 
 @app.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
