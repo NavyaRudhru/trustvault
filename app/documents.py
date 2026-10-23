@@ -114,7 +114,6 @@ def upload_document(
     transaction_committed = False
 
     try:
-        # Validate form values.
         title = title.strip()
         category = category.strip()
 
@@ -138,7 +137,6 @@ def upload_document(
                 detail="Invalid filename.",
             )
 
-        # Validate the extension.
         extension = Path(original_name).suffix.lower()
 
         if extension not in ALLOWED_EXTENSIONS:
@@ -147,8 +145,7 @@ def upload_document(
                 detail="File type is not allowed.",
             )
 
-        # Read at most one byte beyond the limit.
-        # This avoids loading an arbitrarily large upload into memory.
+        # Read at most one byte beyond the upload limit.
         content = file.file.read(MAX_UPLOAD_BYTES + 1)
 
         if not content:
@@ -163,14 +160,13 @@ def upload_document(
                 detail="File exceeds the 10 MB limit.",
             )
 
-        # Check the file signature/content.
         if not validate_file_content(extension, content):
             raise HTTPException(
                 status_code=400,
                 detail="File content does not match its extension.",
             )
 
-        # Store files under generated names, never user-supplied paths.
+        # Never use a user-supplied filename as the storage path.
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
         storage_key = f"{uuid.uuid4().hex}{extension}"
@@ -180,7 +176,6 @@ def upload_document(
             file_created = True
             stored_file.write(content)
 
-        # Create the document record.
         document = Document(
             title=title,
             category=category,
@@ -195,7 +190,6 @@ def upload_document(
         db.flush()
         db.refresh(document)
 
-        # Record success in the same database transaction.
         record_audit_event(
             db=db,
             actor_id=current_user.id,
@@ -214,7 +208,6 @@ def upload_document(
     except HTTPException as exc:
         db.rollback()
 
-        # Remove a file created by this failed upload.
         if file_created and storage_path is not None:
             try:
                 storage_path.unlink(missing_ok=True)
@@ -227,7 +220,6 @@ def upload_document(
     except Exception:
         db.rollback()
 
-        # Do not delete a file after the DB transaction has committed.
         if (
             not transaction_committed
             and file_created
@@ -287,6 +279,7 @@ def list_documents(
             .replace("%", "\\%")
             .replace("_", "\\_")
         )
+
         query = query.filter(
             Document.title.ilike(
                 f"%{escaped_search}%",
@@ -347,7 +340,10 @@ def update_document(
             resource_type="document",
             resource_id=str(document.id),
             outcome="SUCCESS",
-            details=f"Updated document {document.id}; previous title={old_title}",
+            details=(
+                f"Updated document {document.id}; "
+                f"previous title={old_title}"
+            ),
         )
 
         db.commit()
@@ -373,6 +369,7 @@ def delete_document(
 
     document = db.get(Document, document_id)
 
+    # Only the document owner can delete it.
     if document is None or document.owner_id != current_user.id:
         try:
             record_audit_event(
@@ -382,14 +379,26 @@ def delete_document(
                 resource_type="document",
                 resource_id=str(document_id),
                 outcome="DENIED",
-                details="Document deletion denied: requester is not the owner.",
+                details=(
+                    "Document deletion denied: "
+                    "requester is not the owner."
+                ),
             )
             db.commit()
+
         except Exception:
             db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail="Deletion denial could not be audited.",
+            ) from None
 
-        raise HTTPException(status_code=404, detail="Document not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found.",
+        )
 
+    # Resolve and validate the storage path.
     storage_root = STORAGE_DIR.resolve()
     storage_path = (storage_root / document.storage_key).resolve()
 
@@ -399,6 +408,8 @@ def delete_document(
             detail="Invalid document storage path.",
         )
 
+    # Record the successful deletion in the same transaction
+    # as the database changes.
     try:
         record_audit_event(
             db=db,
@@ -424,12 +435,12 @@ def delete_document(
             detail="Document deletion failed.",
         ) from None
 
-    # Delete the physical file only after the DB transaction succeeds.
+    # Delete the physical file only after the database commit.
     if storage_path.is_file():
         try:
             storage_path.unlink()
         except OSError:
-            # A separate cleanup task should handle orphaned files.
+            # A cleanup task should handle orphaned files.
             pass
 
     return {
@@ -460,11 +471,14 @@ def download_document(
                     resource_type="document",
                     resource_id=str(document_id),
                     outcome="DENIED",
-                    details="Download denied by document read authorization.",
+                    details=(
+                        "Download denied by document read authorization."
+                    ),
                 )
                 db.commit()
             except Exception:
                 db.rollback()
+
         raise
 
     storage_root = STORAGE_DIR.resolve()
@@ -505,6 +519,7 @@ def download_document(
             details=f"Downloaded document titled: {document.title}",
         )
         db.commit()
+
     except Exception:
         db.rollback()
         raise HTTPException(
