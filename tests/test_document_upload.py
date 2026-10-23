@@ -266,3 +266,102 @@ def test_database_commit_failure_removes_uploaded_file(
     assert response.status_code == 500
     assert not list(storage_dir.glob("*"))
     assert db.query(Document).count() == 0
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("fake.png", b"not a PNG image"),
+        ("fake.jpg", b"not a JPEG image"),
+        ("fake.jpeg", b"not a JPEG image"),
+        ("fake.pdf", b"not a PDF file"),
+    ],
+)
+def test_invalid_file_signatures_are_rejected_and_audited(
+    upload_test_env, filename, content
+):
+    client, db, token, _user = upload_test_env
+
+    response = client.post(
+        "/documents/",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Invalid signature", "category": "General"},
+        files={
+            "file": (
+                filename,
+                content,
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "File content does not match its extension."
+    )
+    assert db.query(Document).count() == 0
+
+    audit = (
+        db.query(AuditLog)
+        .filter(AuditLog.action == "DOCUMENT_UPLOAD")
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+    assert audit is not None
+    assert audit.outcome == "DENIED"
+
+
+@pytest.mark.parametrize(
+    ("title", "category"),
+    [
+        ("   ", "General"),
+        ("Valid title", "   "),
+    ],
+)
+def test_whitespace_only_title_or_category_is_rejected(
+    upload_test_env, title, category
+):
+    client, db, token, _user = upload_test_env
+
+    response = client.post(
+        "/documents/",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": title, "category": category},
+        files={
+            "file": (
+                "sample.txt",
+                b"Valid text content",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Title and category cannot be empty."
+    )
+    assert db.query(Document).count() == 0
+
+
+def test_rejected_upload_does_not_leave_a_storage_file(upload_test_env):
+    client, db, token, _user = upload_test_env
+
+    response = client.post(
+        "/documents/",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Rejected file", "category": "General"},
+        files={
+            "file": (
+                "malicious.exe",
+                b"not an allowed file",
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert db.query(Document).count() == 0
+
+    from app.documents import STORAGE_DIR
+
+    assert not list(STORAGE_DIR.glob("*"))
