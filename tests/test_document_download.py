@@ -367,3 +367,83 @@ def test_unshared_viewer_cannot_find_private_document_by_search(
         item.get("id") != test["document_id"]
         for item in response.json()
     )
+
+
+def test_non_owner_cannot_grant_permission_and_attempt_is_audited(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=viewer_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": False,
+        },
+    )
+
+    assert response.status_code == 404
+
+    db = test["TestSession"]()
+    try:
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="PERMISSION_GRANT",
+                resource_type="document",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+
+        assert event is not None
+        assert event.actor_id is not None
+    finally:
+        db.close()
+
+
+def test_revoking_missing_permission_is_audited(setup_download_test):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+
+    # Attempt to revoke access that was never granted.
+    response = client.delete(
+        f"/documents/{document_id}/permissions/download_viewer",
+        headers=owner_headers,
+    )
+
+    assert response.status_code == 404
+
+    db = test["TestSession"]()
+    try:
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="PERMISSION_REVOKE",
+                resource_type="document",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+
+        assert event is not None
+        assert event.actor_id is not None
+    finally:
+        db.close()

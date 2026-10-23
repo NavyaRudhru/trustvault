@@ -96,7 +96,6 @@ def require_document_read(
     return document
 
 
-
 def require_document_edit(
     document_id: int,
     user: User,
@@ -129,6 +128,7 @@ def require_document_edit(
 
     return document
 
+
 @router.post("/{document_id}/permissions")
 def grant_document_permission(
     document_id: int,
@@ -159,13 +159,29 @@ def grant_document_permission(
             detail="Document not found.",
         )
 
+    target_username = data.username.strip()
+
     target_user = (
         db.query(User)
-        .filter(User.username == data.username.strip())
+        .filter(User.username == target_username)
         .first()
     )
 
     if target_user is None or not target_user.is_active:
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="PERMISSION_GRANT",
+            resource_type="document",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details=(
+                "Attempted to grant permissions to a "
+                "nonexistent or inactive user."
+            ),
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=404,
             detail="User not found.",
@@ -260,13 +276,29 @@ def revoke_document_permission(
             detail="Document not found.",
         )
 
+    target_username = username.strip()
+
     target_user = (
         db.query(User)
-        .filter(User.username == username)
+        .filter(User.username == target_username)
         .first()
     )
 
     if target_user is None:
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="PERMISSION_REVOKE",
+            resource_type="document",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details=(
+                "Attempted to revoke permissions for a "
+                "nonexistent user."
+            ),
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=404,
             detail="User not found.",
@@ -281,12 +313,28 @@ def revoke_document_permission(
         .first()
     )
 
+    # Audit the failed attempt, but do not interrupt valid revocations.
     if permission is None:
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="PERMISSION_REVOKE",
+            resource_type="document",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details=(
+                "Attempted to revoke a nonexistent permission "
+                f"for username={target_user.username}."
+            ),
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=404,
             detail="Permission not found.",
         )
 
+    # Record successful revocation before committing it.
     record_audit_event(
         db=db,
         actor_id=current_user.id,
