@@ -11,3 +11,5 @@ uploads/
 htmlcov/
 .DS_Store
 trustvault.db
+audit_checkpoints/*
+!audit_checkpoints/.gitkeep
