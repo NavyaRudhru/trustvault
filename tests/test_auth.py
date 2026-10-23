@@ -389,3 +389,39 @@ def test_existing_token_is_rejected_after_user_is_deactivated():
         app.dependency_overrides.pop(get_db, None)
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
+
+
+def test_registration_cannot_assign_admin_role():
+    engine, TestSession, override_get_db = create_test_database()
+    app.dependency_overrides[get_db] = override_get_db
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/auth/register",
+                json={
+                    "username": "role_escalation_test",
+                    "email": "role_escalation_test@example.com",
+                    "password": "StrongPassword123!",
+                    "role": "admin",
+                },
+            )
+
+        assert response.status_code in (200, 201)
+
+        db = TestSession()
+        try:
+            user = (
+                db.query(User)
+                .filter_by(username="role_escalation_test")
+                .first()
+            )
+            assert user is not None
+            assert user.role == "viewer"
+        finally:
+            db.close()
+
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
