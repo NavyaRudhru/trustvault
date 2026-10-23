@@ -425,3 +425,60 @@ def test_registration_cannot_assign_admin_role():
         app.dependency_overrides.pop(get_db, None)
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
+
+
+def test_inactive_user_cannot_login_and_attempt_is_audited():
+    reset_rate_limits()
+    engine, TestSession, override_get_db = create_test_database()
+    app.dependency_overrides[get_db] = override_get_db
+
+    try:
+        db = TestSession()
+        user = User(
+            username="inactive_login_test",
+            email="inactive_login_test@example.com",
+            password_hash=hash_password("StrongPassword123!"),
+            role="viewer",
+            is_active=False,
+        )
+        db.add(user)
+        db.commit()
+        user_id = user.id
+        db.close()
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/auth/login",
+                json={
+                    "username": "inactive_login_test",
+                    "password": "StrongPassword123!",
+                },
+            )
+
+        assert response.status_code == 401
+
+        db = TestSession()
+        try:
+            event = (
+                db.query(AuditLog)
+                .filter_by(
+                    action="login",
+                    resource_type="authentication",
+                    actor_id=user_id,
+                )
+                .first()
+            )
+
+            assert event is not None
+            assert event.outcome == "DENIED"
+            assert event.details == (
+                "invalid_credentials_or_inactive_account"
+            )
+        finally:
+            db.close()
+
+    finally:
+        reset_rate_limits()
+        app.dependency_overrides.pop(get_db, None)
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
