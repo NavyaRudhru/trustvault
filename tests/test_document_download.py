@@ -967,3 +967,105 @@ def test_revoked_editor_cannot_delete_document(setup_download_test):
         assert event is not None
     finally:
         db.close()
+
+
+def test_self_permission_grant_is_rejected(setup_download_test):
+    test = setup_download_test
+
+    response = test["client"].post(
+        f"/documents/{test['document_id']}/permissions",
+        headers={"Authorization": f"Bearer {test['owner_token']}"},
+        json={
+            "username": "download_owner",
+            "can_read": True,
+            "can_edit": False,
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_empty_permission_grant_is_rejected(setup_download_test):
+    test = setup_download_test
+
+    response = test["client"].post(
+        f"/documents/{test['document_id']}/permissions",
+        headers={"Authorization": f"Bearer {test['owner_token']}"},
+        json={
+            "username": "download_viewer",
+            "can_read": False,
+            "can_edit": False,
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_self_permission_grant_failure_is_audited(setup_download_test):
+    test = setup_download_test
+
+    response = test["client"].post(
+        f"/documents/{test['document_id']}/permissions",
+        headers={"Authorization": f"Bearer {test['owner_token']}"},
+        json={
+            "username": "download_owner",
+            "can_read": True,
+            "can_edit": False,
+        },
+    )
+
+    assert response.status_code == 400
+
+    db = test["TestSession"]()
+    try:
+        from app.models import AuditLog
+
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="PERMISSION_GRANT",
+                outcome="DENIED",
+            )
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+
+        assert event is not None
+        assert event.actor_id is not None
+    finally:
+        db.close()
+
+
+def test_empty_permission_grant_failure_is_audited(setup_download_test):
+    test = setup_download_test
+
+    response = test["client"].post(
+        f"/documents/{test['document_id']}/permissions",
+        headers={"Authorization": f"Bearer {test['owner_token']}"},
+        json={
+            "username": "download_viewer",
+            "can_read": False,
+            "can_edit": False,
+        },
+    )
+
+    assert response.status_code == 400
+
+    db = test["TestSession"]()
+    try:
+        from app.models import AuditLog
+
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="PERMISSION_GRANT",
+                outcome="DENIED",
+            )
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+
+        assert event is not None
+        assert event.actor_id is not None
+    finally:
+        db.close()

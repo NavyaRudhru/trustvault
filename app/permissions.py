@@ -130,6 +130,7 @@ def require_document_edit(
 
 
 @router.post("/{document_id}/permissions")
+
 def grant_document_permission(
     document_id: int,
     data: PermissionRequest,
@@ -187,13 +188,42 @@ def grant_document_permission(
             detail="User not found.",
         )
 
+    # Reject and audit attempts to grant permission to the owner.
     if target_user.id == current_user.id:
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="PERMISSION_GRANT",
+            resource_type="document",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details=(
+                "Attempted to grant permissions to the document owner."
+            ),
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=400,
             detail="You already own this document.",
         )
 
+    # Reject and audit requests that grant no access.
     if not data.can_read and not data.can_edit:
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action="PERMISSION_GRANT",
+            resource_type="document",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details=(
+                "Attempted to grant permissions without "
+                "read or edit access."
+            ),
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=400,
             detail="Grant read or edit permission.",
@@ -244,7 +274,6 @@ def grant_document_permission(
         "can_read": permission.can_read,
         "can_edit": permission.can_edit,
     }
-
 
 @router.delete("/{document_id}/permissions/{username}")
 def revoke_document_permission(
