@@ -362,3 +362,66 @@ def test_full_chain_rejects_checkpoint_for_old_entry(
     assert verify_full_chain_against_checkpoint(
         checkpoint, audit_db
     ) is False
+
+
+def test_rollback_to_old_signed_checkpoint_is_rejected(audit_db, tmp_path, monkeypatch):
+    import os
+
+    from app.audit import record_audit_event
+    from app.audit_checkpoint import (
+        create_checkpoint,
+        save_checkpoint,
+        load_checkpoint,
+        verify_full_chain_against_checkpoint,
+    )
+    from app.models import AuditLog
+
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-only-audit-checkpoint-secret-123456",
+    )
+
+    # Create the first audit entry.
+    record_audit_event(
+        db=audit_db,
+        actor_id=None,
+        action="FIRST_EVENT",
+        resource_type="TEST",
+        resource_id="1",
+        outcome="SUCCESS",
+        details="First audit event",
+    )
+    audit_db.commit()
+
+    first_entry = (
+        audit_db.query(AuditLog)
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+
+    old_checkpoint = create_checkpoint(
+        audit_id=first_entry.id,
+        entry_hash=first_entry.entry_hash,
+    )
+
+    # Add a second audit entry after the first checkpoint.
+    record_audit_event(
+        db=audit_db,
+        actor_id=None,
+        action="SECOND_EVENT",
+        resource_type="TEST",
+        resource_id="2",
+        outcome="SUCCESS",
+        details="Second audit event",
+    )
+    audit_db.commit()
+
+    # The old checkpoint is correctly signed, but it is no longer current.
+    save_checkpoint(old_checkpoint, directory=str(tmp_path))
+    loaded_checkpoint = load_checkpoint(directory=str(tmp_path))
+
+    assert loaded_checkpoint is not None
+    assert verify_full_chain_against_checkpoint(
+        loaded_checkpoint,
+        audit_db,
+    ) is False
