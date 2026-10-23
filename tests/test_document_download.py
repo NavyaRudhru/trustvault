@@ -635,3 +635,64 @@ def test_changing_document_id_does_not_bypass_authorization(
         assert document.title == "Private Test Document"
     finally:
         db.close()
+
+
+def test_viewer_cannot_grant_themselves_edit_permission(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # The viewer attempts to grant themselves edit permission.
+    response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=viewer_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": True,
+        },
+    )
+
+    # A non-owner must not be allowed to grant permissions.
+    assert response.status_code == 404
+
+    # Verify that no permission was created for the viewer.
+    db = test["TestSession"]()
+    try:
+        from app.models import DocumentPermission
+
+        permission = (
+            db.query(DocumentPermission)
+            .filter_by(
+                document_id=document_id,
+                user_id=None,
+            )
+            .first()
+        )
+
+        # Check using the actual viewer ID from the database.
+        viewer = (
+            db.query(User)
+            .filter_by(username="download_viewer")
+            .first()
+        )
+        assert viewer is not None
+
+        permission = (
+            db.query(DocumentPermission)
+            .filter_by(
+                document_id=document_id,
+                user_id=viewer.id,
+            )
+            .first()
+        )
+
+        assert permission is None
+    finally:
+        db.close()
