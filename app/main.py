@@ -4,6 +4,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from fastapi import Request
+from app.rate_limit import (
+    is_login_rate_limited,
+    record_failed_login,
+    clear_failed_logins,
+)
+
 from app.documents import router as documents_router
 from app.auth import create_access_token, get_current_user
 from app.permissions import router as permissions_router
@@ -138,9 +145,24 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/login", response_model=TokenResponse)
-def login(data: LoginRequest, db: Session = Depends(get_db)):
+def login(
+    data: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    username = data.username.strip()
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Block further attempts after five failures in the window.
+    if is_login_rate_limited(client_ip, username):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Try again later.",
+            headers={"Retry-After": "900"},
+        )
+
     user = db.scalar(
-        select(User).where(User.username == data.username.strip())
+        select(User).where(User.username == username)
     )
 
     if (
@@ -148,14 +170,17 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         or not user.is_active
         or not verify_password(data.password, user.password_hash)
     ):
+        record_failed_login(client_ip, username)
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return TokenResponse(access_token=create_access_token(user.id))
+    clear_failed_logins(client_ip, username)
 
+    return TokenResponse(access_token=create_access_token(user.id))
 
 @app.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
