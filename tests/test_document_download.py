@@ -696,3 +696,62 @@ def test_viewer_cannot_grant_themselves_edit_permission(
         assert permission is None
     finally:
         db.close()
+
+
+def test_editor_can_update_document_and_update_is_audited(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # The owner grants both read and edit permission.
+    grant_response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=owner_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": True,
+        },
+    )
+    assert grant_response.status_code == 200
+
+    # The authorized editor updates the document.
+    update_response = client.patch(
+        f"/documents/{document_id}",
+        headers=viewer_headers,
+        json={
+            "title": "Updated by Authorized Editor",
+            "category": "Approved Testing",
+        },
+    )
+    assert update_response.status_code == 200
+
+    # Verify the update was saved and audited.
+    db = test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title == "Updated by Authorized Editor"
+        assert document.category == "Approved Testing"
+
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="DOCUMENT_UPDATE",
+                resource_id=str(document_id),
+                outcome="SUCCESS",
+            )
+            .first()
+        )
+        assert event is not None
+    finally:
+        db.close()
