@@ -170,3 +170,23 @@ def test_upload_requires_authentication(upload_test_env):
     from app.models import Document
 
     assert db.query(Document).count() == 0
+
+
+def test_upload_normalizes_windows_style_filename(upload_test_env):
+    client, db, token, _user = upload_test_env
+
+    response = client.post(
+        "/documents/",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"title": "Filename test", "category": "General"},
+        files={
+            "file": (
+                r"C:\fakepath\sample.txt",
+                b"Safe test content",
+                "text/plain",
+            )
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["original_filename"] == "sample.txt"

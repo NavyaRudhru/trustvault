@@ -80,7 +80,8 @@ async def upload_document(
 ):
     """Validate and save an uploaded document in private storage."""
 
-    original_name = Path(file.filename or "").name
+    raw_filename = (file.filename or "").replace("\\", "/")
+    original_name = Path(raw_filename).name
     extension = Path(original_name).suffix.lower()
 
     try:
