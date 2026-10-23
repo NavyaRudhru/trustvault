@@ -1,4 +1,6 @@
+
 import uuid
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from fastapi import (
@@ -43,13 +45,13 @@ def audit_rejected_upload(
     current_user: User,
     reason: str,
 ) -> None:
-    """Attempt to record a rejected upload."""
+    """Record rejected uploads; fail closed if the audit cannot be saved."""
     try:
         record_audit_event(
             db=db,
             actor_id=current_user.id,
             action="DOCUMENT_UPLOAD",
-            resource_type="document",
+            resource_type="DOCUMENT",
             resource_id=None,
             outcome="DENIED",
             details=f"Upload rejected: {reason}",
@@ -57,6 +59,10 @@ def audit_rejected_upload(
         db.commit()
     except Exception:
         db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Upload rejection could not be audited.",
+        ) from None
 
 
 def validate_file_content(extension: str, content: bytes) -> bool:
@@ -122,7 +128,6 @@ def upload_document(
                 detail="Title and category cannot be empty.",
             )
 
-        # Normalize Windows and Unix-style filenames.
         raw_filename = (file.filename or "").replace("\\", "/")
         original_name = Path(raw_filename).name
 
@@ -144,7 +149,6 @@ def upload_document(
                 detail="File type is not allowed.",
             )
 
-        # Read at most one byte beyond the upload limit.
         content = file.file.read(MAX_UPLOAD_BYTES + 1)
 
         if not content:
@@ -165,7 +169,6 @@ def upload_document(
                 detail="File content does not match its extension.",
             )
 
-        # Never use a user-supplied filename as the storage path.
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
         storage_key = f"{uuid.uuid4().hex}{extension}"
@@ -193,8 +196,8 @@ def upload_document(
             db=db,
             actor_id=current_user.id,
             action="DOCUMENT_UPLOAD",
-            resource_type="document",
-            resource_id=document.id,
+            resource_type="DOCUMENT",
+            resource_id=str(document.id),
             outcome="SUCCESS",
             details=f"Uploaded document: {original_name}",
         )
@@ -248,10 +251,19 @@ def upload_document(
 def list_documents(
     search: str | None = None,
     category: str | None = None,
+    owner: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List documents owned by or explicitly shared with the user."""
+    """List only owned or explicitly shared documents, with search filters."""
+
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(
+            status_code=400,
+            detail="date_from must not be after date_to.",
+        )
 
     permitted_ids = (
         db.query(DocumentPermission.document_id)
@@ -272,23 +284,48 @@ def list_documents(
     )
 
     if search and search.strip():
-        escaped_search = (
+        term = (
             search.strip()
             .replace("\\", "\\\\")
             .replace("%", "\\%")
             .replace("_", "\\_")
         )
+        pattern = f"%{term}%"
 
         query = query.filter(
-            Document.title.ilike(
-                f"%{escaped_search}%",
-                escape="\\",
+            or_(
+                Document.title.ilike(pattern, escape="\\"),
+                Document.original_filename.ilike(pattern, escape="\\"),
             )
         )
 
     if category and category.strip():
+        term = (
+            category.strip()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
         query = query.filter(
-            Document.category.ilike(category.strip())
+            Document.category.ilike(f"%{term}%", escape="\\")
+        )
+
+    if owner and owner.strip():
+        owner_ids = (
+            db.query(User.id)
+            .filter(User.username.ilike(owner.strip()))
+        )
+        query = query.filter(Document.owner_id.in_(owner_ids))
+
+    if date_from:
+        query = query.filter(
+            Document.created_at >= datetime.combine(date_from, time.min)
+        )
+
+    if date_to:
+        query = query.filter(
+            Document.created_at
+            < datetime.combine(date_to + timedelta(days=1), time.min)
         )
 
     documents = query.order_by(Document.created_at.desc()).all()
@@ -336,7 +373,7 @@ def update_document(
             db=db,
             actor_id=current_user.id,
             action="DOCUMENT_UPDATE",
-            resource_type="document",
+            resource_type="DOCUMENT",
             resource_id=str(document.id),
             outcome="SUCCESS",
             details=(
@@ -368,23 +405,18 @@ def delete_document(
 
     document = db.get(Document, document_id)
 
-    # Only the document owner can delete it.
     if document is None or document.owner_id != current_user.id:
         try:
             record_audit_event(
                 db=db,
                 actor_id=current_user.id,
                 action="DOCUMENT_DELETE",
-                resource_type="document",
+                resource_type="DOCUMENT",
                 resource_id=str(document_id),
                 outcome="DENIED",
-                details=(
-                    "Document deletion denied: "
-                    "requester is not the owner."
-                ),
+                details="Document deletion denied: requester is not the owner.",
             )
             db.commit()
-
         except Exception:
             db.rollback()
             raise HTTPException(
@@ -397,7 +429,6 @@ def delete_document(
             detail="Document not found.",
         )
 
-    # Resolve and validate the storage path.
     storage_root = STORAGE_DIR.resolve()
     storage_path = (storage_root / document.storage_key).resolve()
 
@@ -407,14 +438,12 @@ def delete_document(
             detail="Invalid document storage path.",
         )
 
-    # Record the successful deletion in the same transaction
-    # as the database changes.
     try:
         record_audit_event(
             db=db,
             actor_id=current_user.id,
             action="DOCUMENT_DELETE",
-            resource_type="document",
+            resource_type="DOCUMENT",
             resource_id=str(document.id),
             outcome="SUCCESS",
             details=f"Deleted document titled: {document.title}",
@@ -434,12 +463,10 @@ def delete_document(
             detail="Document deletion failed.",
         ) from None
 
-    # Delete the physical file only after the database commit.
     if storage_path.is_file():
         try:
             storage_path.unlink()
         except OSError:
-            # A cleanup task should handle orphaned files.
             pass
 
     return {
@@ -456,40 +483,16 @@ def download_document(
 ):
     """Download only after verifying document read permission."""
 
-    try:
-        document = require_document_read(
-            document_id, current_user, db
-        )
-    except HTTPException as exc:
-        if exc.status_code in (403, 404):
-            # Do not silently allow a denied request to go unaudited.
-            try:
-                record_audit_event(
-                    db=db,
-                    actor_id=current_user.id,
-                    action="DOCUMENT_DOWNLOAD",
-                    resource_type="document",
-                    resource_id=str(document_id),
-                    outcome="DENIED",
-                    details=(
-                        "Download denied by document read authorization."
-                    ),
-                )
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise HTTPException(
-                    status_code=500,
-                    detail="Download denial could not be audited.",
-                ) from None
-
-        raise
+    document = require_document_read(
+        document_id,
+        current_user,
+        db,
+        audit_action="DOCUMENT_DOWNLOAD",
+    )
 
     storage_root = STORAGE_DIR.resolve()
     storage_path = (storage_root / document.storage_key).resolve()
 
-    # Ensure the resolved file stays directly inside the private storage
-    # directory and exists before returning it.
     if (
         storage_path.parent != storage_root
         or not storage_path.is_file()
@@ -499,7 +502,7 @@ def download_document(
                 db=db,
                 actor_id=current_user.id,
                 action="DOCUMENT_DOWNLOAD",
-                resource_type="document",
+                resource_type="DOCUMENT",
                 resource_id=str(document_id),
                 outcome="DENIED",
                 details="Stored file is missing or its path is invalid.",
@@ -517,13 +520,12 @@ def download_document(
             detail="Document file not found.",
         )
 
-    # Fail closed if the authorized download cannot be audited.
     try:
         record_audit_event(
             db=db,
             actor_id=current_user.id,
             action="DOCUMENT_DOWNLOAD",
-            resource_type="document",
+            resource_type="DOCUMENT",
             resource_id=str(document.id),
             outcome="SUCCESS",
             details=f"Download authorized for document: {document.title}",

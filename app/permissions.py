@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -9,10 +9,7 @@ from app.database import get_db
 from app.models import Document, DocumentPermission, User
 
 
-router = APIRouter(
-    prefix="/documents",
-    tags=["Document Permissions"],
-)
+router = APIRouter()
 
 
 class PermissionRequest(BaseModel):
@@ -21,15 +18,18 @@ class PermissionRequest(BaseModel):
     can_edit: bool = False
 
 
-def require_roles(*allowed_roles: str):
+def require_roles(*allowed_roles):
+    """Create a dependency that checks a user's role."""
+
     def role_checker(
         current_user: User = Depends(get_current_user),
-    ) -> User:
+    ):
         if current_user.role not in allowed_roles:
             raise HTTPException(
-                status_code=403,
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have permission to perform this action.",
             )
+
         return current_user
 
     return role_checker
@@ -40,6 +40,8 @@ def can_read_document(
     user: User,
     db: Session,
 ) -> bool:
+    """Check whether a user can read a document."""
+
     if document.owner_id == user.id:
         return True
 
@@ -63,6 +65,8 @@ def can_edit_document(
     user: User,
     db: Session,
 ) -> bool:
+    """Check whether a user can edit a document."""
+
     if document.owner_id == user.id:
         return True
 
@@ -78,18 +82,66 @@ def can_edit_document(
     return bool(permission and permission.can_edit)
 
 
+def _audit_denial(
+    db: Session,
+    *,
+    action: str,
+    document_id: int,
+    actor_id: int,
+    details: str,
+) -> None:
+    """
+    Record a denied operation before returning an error.
+
+    If the audit cannot be persisted, fail closed.
+    """
+
+    try:
+        record_audit_event(
+            db=db,
+            action=action,
+            resource_type="document",
+            resource_id=str(document_id),
+            actor_id=actor_id,
+            outcome="DENIED",
+            details=details,
+        )
+        db.commit()
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Denied action could not be audited.",
+        ) from None
+
+
 def require_document_read(
     document_id: int,
     user: User,
     db: Session,
+    audit_action: str = "DOCUMENT_READ",
 ) -> Document:
-    document = db.get(Document, document_id)
+    """Return a document only when the user has read permission."""
 
-    if document is None or not can_read_document(
-        document, user, db
-    ):
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id)
+        .first()
+    )
+
+    if document is None or not can_read_document(document, user, db):
+        _audit_denial(
+            db,
+            action=audit_action,
+            document_id=document_id,
+            actor_id=user.id,
+            details="document_missing_or_read_access_denied",
+        )
+
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found.",
         )
 
@@ -101,131 +153,107 @@ def require_document_edit(
     user: User,
     db: Session,
 ) -> Document:
-    document = db.get(Document, document_id)
+    """Return a document only when the user has edit permission."""
 
-    if document is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found.",
-        )
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id)
+        .first()
+    )
 
-    if not can_edit_document(document, user, db):
-        record_audit_event(
-            db=db,
-            actor_id=user.id,
+    if document is None or not can_edit_document(document, user, db):
+        _audit_denial(
+            db,
             action="DOCUMENT_UPDATE",
-            resource_type="DOCUMENT",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details="Unauthorized document edit attempt.",
+            document_id=document_id,
+            actor_id=user.id,
+            details="document_missing_or_edit_access_denied",
         )
-        db.commit()
 
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found.",
         )
 
     return document
 
 
-@router.post("/{document_id}/permissions")
-
-def grant_document_permission(
+@router.post("/documents/{document_id}/permissions")
+def grant_permission(
     document_id: int,
     data: PermissionRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    document = db.get(Document, document_id)
+    """Allow a document owner to grant read or edit access."""
 
-    # Only the document owner can grant permissions.
-    if document is None or document.owner_id != current_user.id:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
-            action="PERMISSION_GRANT",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Attempted to grant permissions without "
-                "document ownership."
-            ),
-        )
-        db.commit()
-
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found.",
-        )
-
-    target_username = data.username.strip()
-
-    target_user = (
-        db.query(User)
-        .filter(User.username == target_username)
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id)
         .first()
     )
 
-    if target_user is None or not target_user.is_active:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
+    if document is None or document.owner_id != current_user.id:
+        _audit_denial(
+            db,
             action="PERMISSION_GRANT",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Attempted to grant permissions to a "
-                "nonexistent or inactive user."
-            ),
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="document_missing_or_grant_attempt_by_non_owner",
         )
-        db.commit()
 
         raise HTTPException(
-            status_code=404,
-            detail="User not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
         )
 
-    # Reject and audit attempts to grant permission to the owner.
-    if target_user.id == current_user.id:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
+    username = data.username.strip()
+
+    target = (
+        db.query(User)
+        .filter(User.username == username)
+        .first()
+    )
+
+    if target is None or not target.is_active:
+        _audit_denial(
+            db,
             action="PERMISSION_GRANT",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Attempted to grant permissions to the document owner."
-            ),
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="grant_target_missing_or_inactive",
         )
-        db.commit()
 
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target user not found.",
+        )
+
+    if target.id == current_user.id:
+        _audit_denial(
+            db,
+            action="PERMISSION_GRANT",
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="owner_attempted_self_grant",
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="You already own this document.",
         )
 
-    # Reject and audit requests that grant no access.
     if not data.can_read and not data.can_edit:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
+        _audit_denial(
+            db,
             action="PERMISSION_GRANT",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Attempted to grant permissions without "
-                "read or edit access."
-            ),
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="empty_permission_grant",
         )
-        db.commit()
 
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Grant read or edit permission.",
         )
 
@@ -233,103 +261,105 @@ def grant_document_permission(
         db.query(DocumentPermission)
         .filter_by(
             document_id=document_id,
-            user_id=target_user.id,
+            user_id=target.id,
         )
         .first()
     )
 
-    if permission is None:
-        permission = DocumentPermission(
-            document_id=document_id,
-            user_id=target_user.id,
-            granted_by_id=current_user.id,
+    try:
+        if permission is None:
+            permission = DocumentPermission(
+                document_id=document_id,
+                user_id=target.id,
+                can_read=data.can_read or data.can_edit,
+                can_edit=data.can_edit,
+                granted_by_id=current_user.id,
+            )
+            db.add(permission)
+        else:
+            permission.can_read = data.can_read or data.can_edit
+            permission.can_edit = data.can_edit
+            permission.granted_by_id = current_user.id
+
+        record_audit_event(
+            db=db,
+            action="PERMISSION_GRANT",
+            resource_type="document",
+            resource_id=str(document_id),
+            actor_id=current_user.id,
+            outcome="SUCCESS",
+            details=(
+                f"permissions_granted_to={target.username};"
+                f"can_read={data.can_read or data.can_edit};"
+                f"can_edit={data.can_edit}"
+            ),
         )
-        db.add(permission)
 
-    # Edit permission also allows reading.
-    permission.can_edit = data.can_edit
-    permission.can_read = data.can_read or data.can_edit
+        db.commit()
 
-    record_audit_event(
-        db=db,
-        actor_id=current_user.id,
-        action="PERMISSION_GRANT",
-        resource_type="document",
-        resource_id=str(document_id),
-        outcome="SUCCESS",
-        details=(
-            f"Granted permissions to username={target_user.username}; "
-            f"can_read={permission.can_read}; "
-            f"can_edit={permission.can_edit}"
-        ),
-    )
+    except Exception:
+        db.rollback()
 
-    db.commit()
-    db.refresh(permission)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Permission grant could not be completed.",
+        ) from None
 
     return {
-        "message": "Document permissions updated successfully.",
+        "message": "Permission granted.",
         "document_id": document_id,
-        "username": target_user.username,
-        "can_read": permission.can_read,
-        "can_edit": permission.can_edit,
+        "username": target.username,
+        "can_read": data.can_read or data.can_edit,
+        "can_edit": data.can_edit,
     }
 
-@router.delete("/{document_id}/permissions/{username}")
-def revoke_document_permission(
+
+@router.delete("/documents/{document_id}/permissions/{username}")
+def revoke_permission(
     document_id: int,
     username: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    document = db.get(Document, document_id)
+    """Allow only the document owner to revoke a user's access."""
 
-    # Only the document owner can revoke permissions.
-    if document is None or document.owner_id != current_user.id:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
-            action="PERMISSION_REVOKE",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Attempted to revoke permissions without "
-                "document ownership."
-            ),
-        )
-        db.commit()
-
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found.",
-        )
-
-    target_username = username.strip()
-
-    target_user = (
-        db.query(User)
-        .filter(User.username == target_username)
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id)
         .first()
     )
 
-    if target_user is None:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
+    if document is None or document.owner_id != current_user.id:
+        _audit_denial(
+            db,
             action="PERMISSION_REVOKE",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Attempted to revoke permissions for a "
-                "nonexistent user."
-            ),
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="document_missing_or_revoke_attempt_by_non_owner",
         )
-        db.commit()
 
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    target = (
+        db.query(User)
+        .filter(User.username == username.strip())
+        .first()
+    )
+
+    if target is None:
+        _audit_denial(
+            db,
+            action="PERMISSION_REVOKE",
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="revoke_target_missing",
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found.",
         )
 
@@ -337,50 +367,49 @@ def revoke_document_permission(
         db.query(DocumentPermission)
         .filter_by(
             document_id=document_id,
-            user_id=target_user.id,
+            user_id=target.id,
         )
         .first()
     )
 
-    # Audit the failed attempt, but do not interrupt valid revocations.
     if permission is None:
-        record_audit_event(
-            db=db,
-            actor_id=current_user.id,
+        _audit_denial(
+            db,
             action="PERMISSION_REVOKE",
-            resource_type="document",
-            resource_id=str(document_id),
-            outcome="DENIED",
-            details=(
-                "Attempted to revoke a nonexistent permission "
-                f"for username={target_user.username}."
-            ),
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="permission_does_not_exist",
         )
-        db.commit()
 
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Permission not found.",
         )
 
-    # Record successful revocation before committing it.
-    record_audit_event(
-        db=db,
-        actor_id=current_user.id,
-        action="PERMISSION_REVOKE",
-        resource_type="document",
-        resource_id=str(document_id),
-        outcome="SUCCESS",
-        details=(
-            f"Revoked permissions for username={target_user.username}"
-        ),
-    )
+    try:
+        record_audit_event(
+            db=db,
+            action="PERMISSION_REVOKE",
+            resource_type="document",
+            resource_id=str(document_id),
+            actor_id=current_user.id,
+            outcome="SUCCESS",
+            details=f"permissions_revoked_from={target.username}",
+        )
 
-    db.delete(permission)
-    db.commit()
+        db.delete(permission)
+        db.commit()
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Permission revocation could not be completed.",
+        ) from None
 
     return {
-        "message": "Document access revoked successfully.",
+        "message": "Permission revoked.",
         "document_id": document_id,
-        "username": target_user.username,
+        "username": target.username,
     }
