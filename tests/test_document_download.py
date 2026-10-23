@@ -447,3 +447,102 @@ def test_revoking_missing_permission_is_audited(setup_download_test):
         assert event.actor_id is not None
     finally:
         db.close()
+
+
+def test_read_only_viewer_cannot_edit_document(setup_download_test):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # The owner grants read access, but not edit access.
+    grant_response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=owner_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": False,
+        },
+    )
+    assert grant_response.status_code == 200
+
+    # The viewer must not be able to edit the document.
+    response = client.patch(
+        f"/documents/{document_id}",
+        headers=viewer_headers,
+        json={
+            "title": "Unauthorized title change",
+            "category": "Unauthorized category",
+        },
+    )
+    assert response.status_code == 404
+
+    # Confirm that the document was not modified.
+    db = test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title == "Private Test Document"
+        assert document.category == "Testing"
+
+        # Confirm that the denied edit was audited.
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="DOCUMENT_UPDATE",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .first()
+        )
+        assert event is not None
+    finally:
+        db.close()
+
+
+def test_unauthenticated_user_cannot_access_private_document(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    # No Authorization header is provided.
+    endpoints = [
+        ("GET", f"/documents/{document_id}"),
+        ("GET", f"/documents/{document_id}/download"),
+        ("PATCH", f"/documents/{document_id}"),
+        ("DELETE", f"/documents/{document_id}"),
+    ]
+
+    for method, url in endpoints:
+        response = client.request(
+            method,
+            url,
+            json={
+                "title": "Unauthorized change",
+                "category": "Unauthorized",
+            } if method == "PATCH" else None,
+        )
+
+        assert response.status_code == 401, (
+            f"{method} {url} should require authentication, "
+            f"but returned {response.status_code}"
+        )
+
+    # Confirm that the private document still exists and is unchanged.
+    db = test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title == "Private Test Document"
+        assert document.category == "Testing"
+    finally:
+        db.close()
