@@ -599,3 +599,39 @@ def test_read_only_viewer_cannot_delete_document(setup_download_test):
         assert event is not None
     finally:
         db.close()
+
+
+def test_changing_document_id_does_not_bypass_authorization(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    # The viewer has no permission for the owner's document.
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # Try to access the private document by its ID.
+    response = client.get(
+        f"/documents/{document_id}",
+        headers=viewer_headers,
+    )
+    assert response.status_code == 404
+
+    # Try downloading the same private document by its ID.
+    download_response = client.get(
+        f"/documents/{document_id}/download",
+        headers=viewer_headers,
+    )
+    assert download_response.status_code == 404
+
+    # Verify the original document remains unchanged.
+    db = test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title == "Private Test Document"
+    finally:
+        db.close()
