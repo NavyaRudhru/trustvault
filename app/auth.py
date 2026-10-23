@@ -1,7 +1,11 @@
 
 import os
 
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from itsdangerous import (
+    URLSafeTimedSerializer,
+    BadSignature,
+    SignatureExpired,
+)
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -10,14 +14,18 @@ from app.database import get_db
 from app.models import User
 
 
-APP_ENV = os.getenv("APP_ENV", "development")
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 SECRET_KEY = os.getenv("SESSION_SECRET")
 
-if not SECRET_KEY and APP_ENV.lower() == "production":
-    raise RuntimeError("SESSION_SECRET must be configured in production.")
-
-if not SECRET_KEY:
-    SECRET_KEY = "local-development-only-change-before-deployment"
+# Production must never use a hard-coded development secret.
+if APP_ENV == "production":
+    if not SECRET_KEY or len(SECRET_KEY) < 32:
+        raise RuntimeError(
+            "Production requires a SESSION_SECRET with at least 32 characters."
+        )
+else:
+    if not SECRET_KEY:
+        SECRET_KEY = "local-development-only-change-before-deployment"
 
 serializer = URLSafeTimedSerializer(
     SECRET_KEY,
@@ -51,7 +59,11 @@ def get_current_user(
         user_id = payload.get("user_id")
 
         if not isinstance(user_id, int) or isinstance(user_id, bool):
-            raise HTTPException(status_code=401, detail="Invalid authentication token.")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     except (BadSignature, SignatureExpired):
         raise HTTPException(
@@ -69,5 +81,5 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Always load the user's current role from the database.
+    # Always use the user's current role from the database.
     return user
