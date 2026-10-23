@@ -351,3 +351,41 @@ def test_failed_login_is_audited():
         app.dependency_overrides.pop(get_db, None)
         Base.metadata.drop_all(bind=engine)
         engine.dispose()
+
+
+def test_existing_token_is_rejected_after_user_is_deactivated():
+    engine, TestSession, override_get_db = create_test_database()
+    app.dependency_overrides[get_db] = override_get_db
+
+    try:
+        db = TestSession()
+        user = User(
+            username="deactivation_test_user",
+            email="deactivation_test_user@example.com",
+            password_hash="not_used_in_this_test",
+            role="viewer",
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        token = create_access_token(user.id)
+
+        # Deactivate the account after the token has been created.
+        user.is_active = False
+        db.commit()
+        db.close()
+
+        with TestClient(app) as client:
+            response = client.get(
+                "/me",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 401
+
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
