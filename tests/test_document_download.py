@@ -755,3 +755,81 @@ def test_editor_can_update_document_and_update_is_audited(
         assert event is not None
     finally:
         db.close()
+
+
+def test_revoked_edit_permission_blocks_updates_immediately(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # Owner grants edit permission.
+    grant_response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=owner_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": True,
+        },
+    )
+    assert grant_response.status_code == 200
+
+    # Verify the viewer can edit before revocation.
+    allowed_response = client.patch(
+        f"/documents/{document_id}",
+        headers=viewer_headers,
+        json={
+            "title": "Allowed Before Revocation",
+            "category": "Testing",
+        },
+    )
+    assert allowed_response.status_code == 200
+
+    # Owner revokes the viewer's permission.
+    revoke_response = client.delete(
+        f"/documents/{document_id}/permissions/download_viewer",
+        headers=owner_headers,
+    )
+    assert revoke_response.status_code == 200
+
+    # The same viewer must now be denied.
+    denied_response = client.patch(
+        f"/documents/{document_id}",
+        headers=viewer_headers,
+        json={
+            "title": "Unauthorized After Revocation",
+            "category": "Unauthorized",
+        },
+    )
+    assert denied_response.status_code == 404
+
+    # Verify the unauthorized update did not change the document.
+    db = test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title == "Allowed Before Revocation"
+        assert document.category == "Testing"
+
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="DOCUMENT_UPDATE",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert event is not None
+    finally:
+        db.close()
