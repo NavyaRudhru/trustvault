@@ -312,3 +312,58 @@ def test_unshared_viewer_cannot_delete_document(setup_download_test):
         )
     finally:
         db.close()
+
+
+def test_unshared_viewer_cannot_access_document_details(
+    setup_download_test,
+):
+    test = setup_download_test
+    client = test["client"]
+    viewer_token = test["viewer_token"]
+    document_id = test["document_id"]
+
+    response = client.get(
+        f"/documents/{document_id}",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_unshared_viewer_cannot_see_private_document_in_list(
+    setup_download_test,
+):
+    test = setup_download_test
+
+    response = test["client"].get(
+        "/documents",
+        headers={
+            "Authorization": f"Bearer {test['viewer_token']}"
+        },
+    )
+
+    assert response.status_code == 200
+    assert all(
+        item.get("id") != test["document_id"]
+        for item in response.json()
+    )
+
+
+def test_unshared_viewer_cannot_find_private_document_by_search(
+    setup_download_test,
+):
+    test = setup_download_test
+
+    response = test["client"].get(
+        "/documents",
+        params={"search": "Private Test Document"},
+        headers={
+            "Authorization": f"Bearer {test['viewer_token']}"
+        },
+    )
+
+    assert response.status_code == 200
+    assert all(
+        item.get("id") != test["document_id"]
+        for item in response.json()
+    )
