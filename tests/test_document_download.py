@@ -907,3 +907,63 @@ def test_non_owner_cannot_revoke_permission_and_attempt_is_audited(
         assert event.actor_id == viewer.id
     finally:
         db.close()
+
+
+def test_revoked_editor_cannot_delete_document(setup_download_test):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # Owner grants read and edit permission.
+    grant_response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=owner_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": True,
+        },
+    )
+    assert grant_response.status_code == 200
+
+    # Owner revokes the editor's permission.
+    revoke_response = client.delete(
+        f"/documents/{document_id}/permissions/download_viewer",
+        headers=owner_headers,
+    )
+    assert revoke_response.status_code == 200
+
+    # The former editor must not be able to delete the document.
+    delete_response = client.delete(
+        f"/documents/{document_id}",
+        headers=viewer_headers,
+    )
+    assert delete_response.status_code == 404
+
+    db = test["TestSession"]()
+    try:
+        # Confirm the document still exists.
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title == "Private Test Document"
+
+        # Confirm the denied deletion was audited.
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="DOCUMENT_DELETE",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .first()
+        )
+        assert event is not None
+    finally:
+        db.close()
