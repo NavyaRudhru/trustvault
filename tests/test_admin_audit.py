@@ -224,3 +224,64 @@ def test_admin_verification_detects_tampered_audit_log(
 
     finally:
         cleanup_admin_test(client, db, engine)
+
+
+def test_admin_verification_rejects_old_signed_checkpoint(
+    tmp_path, monkeypatch
+):
+    client, db, engine, _, admin_token = setup_admin_test()
+
+    try:
+        # Create the first audit entry and checkpoint it.
+        record_audit_event(
+            db=db,
+            actor_id=None,
+            action="TEST_EVENT",
+            resource_type="TEST",
+            resource_id="1",
+            outcome="SUCCESS",
+            details="First audit event",
+        )
+        db.commit()
+
+        create_matching_checkpoint(db, tmp_path)
+
+        from app.audit_checkpoint import load_checkpoint
+
+        monkeypatch.setattr(
+            "app.main.load_checkpoint",
+            lambda: load_checkpoint(directory=str(tmp_path)),
+        )
+
+        headers = {"Authorization": f"Bearer {admin_token}"}
+
+        # Confirm the original checkpoint is valid.
+        response = client.get(
+            "/admin/audit/verify",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["valid"] is True
+
+        # Add a newer audit entry without updating the checkpoint.
+        record_audit_event(
+            db=db,
+            actor_id=None,
+            action="TEST_EVENT",
+            resource_type="TEST",
+            resource_id="2",
+            outcome="SUCCESS",
+            details="Newer audit event",
+        )
+        db.commit()
+
+        # The endpoint must detect that the checkpoint is outdated.
+        response = client.get(
+            "/admin/audit/verify",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["valid"] is False
+
+    finally:
+        cleanup_admin_test(client, db, engine)
