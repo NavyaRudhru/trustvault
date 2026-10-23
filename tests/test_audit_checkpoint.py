@@ -425,3 +425,160 @@ def test_rollback_to_old_signed_checkpoint_is_rejected(audit_db, tmp_path, monke
         loaded_checkpoint,
         audit_db,
     ) is False
+
+
+def test_invalid_existing_checkpoint_is_not_overwritten(
+    monkeypatch, tmp_path
+):
+    from app.audit_checkpoint import save_checkpoint
+
+    monkeypatch.setenv(
+        "AUDIT_CHECKPOINT_SECRET",
+        "test-only-audit-checkpoint-secret-123456",
+    )
+
+    valid_checkpoint = create_checkpoint(
+        audit_id=1,
+        entry_hash="original-hash",
+    )
+
+    path = save_checkpoint(
+        valid_checkpoint,
+        directory=str(tmp_path),
+    )
+
+    original_content = path.read_text(encoding="utf-8")
+
+    # Tamper with the saved checkpoint.
+    saved_data = json.loads(original_content)
+    saved_data["entry_hash"] = "tampered-hash"
+
+    path.write_text(
+        json.dumps(saved_data),
+        encoding="utf-8",
+    )
+
+    tampered_content = path.read_text(encoding="utf-8")
+
+    # The invalid checkpoint must not be accepted for replacement.
+    assert load_checkpoint(directory=str(tmp_path)) is None
+
+    # Confirm that the invalid checkpoint file remains unchanged.
+    assert path.read_text(encoding="utf-8") == tampered_content
+
+
+def test_checkpoint_script_refuses_invalid_existing_checkpoint(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from scripts import create_audit_checkpoint as checkpoint_script
+
+    fake_db = SimpleNamespace(
+        scalar=lambda query: SimpleNamespace(
+            id=1,
+            entry_hash="current-audit-hash",
+        ),
+        close=lambda: None,
+    )
+
+    monkeypatch.setattr(
+        checkpoint_script,
+        "SessionLocal",
+        lambda: fake_db,
+    )
+    monkeypatch.setattr(
+        checkpoint_script,
+        "verify_audit_chain",
+        lambda db: (True, "Audit chain is valid"),
+    )
+    monkeypatch.setattr(
+        checkpoint_script,
+        "load_checkpoint",
+        lambda: {"audit_id": 1, "entry_hash": "tampered"},
+    )
+    monkeypatch.setattr(
+        checkpoint_script,
+        "verify_full_chain_against_checkpoint",
+        lambda checkpoint, db: False,
+    )
+
+    def unexpected_save(*args, **kwargs):
+        pytest.fail("The script must not save over an invalid checkpoint.")
+
+    monkeypatch.setattr(
+        checkpoint_script,
+        "save_checkpoint",
+        unexpected_save,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="existing checkpoint",
+    ):
+        checkpoint_script.main()
+
+
+def test_checkpoint_script_refuses_corrupted_checkpoint_file(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from scripts import create_audit_checkpoint as checkpoint_script
+
+    fake_db = SimpleNamespace(
+        scalar=lambda query: SimpleNamespace(
+            id=1,
+            entry_hash="current-audit-hash",
+        ),
+        close=lambda: None,
+    )
+
+    monkeypatch.setattr(
+        checkpoint_script,
+        "SessionLocal",
+        lambda: fake_db,
+    )
+    monkeypatch.setattr(
+        checkpoint_script,
+        "verify_audit_chain",
+        lambda db: (True, "Audit chain is valid"),
+    )
+    monkeypatch.setattr(
+        checkpoint_script,
+        "load_checkpoint",
+        lambda: None,
+    )
+
+    # Make the script's resolved project root equal to tmp_path.
+    monkeypatch.setattr(
+        checkpoint_script.Path,
+        "resolve",
+        lambda self: tmp_path / "scripts" / "create_audit_checkpoint.py",
+    )
+
+    # The script checks audit_checkpoints/latest.json under that root.
+    checkpoint_dir = tmp_path / "audit_checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint_file = checkpoint_dir / "latest.json"
+    checkpoint_file.write_text(
+        "{invalid JSON",
+        encoding="utf-8",
+    )
+
+    def unexpected_save(*args, **kwargs):
+        pytest.fail("The script must not overwrite a corrupted checkpoint.")
+
+    monkeypatch.setattr(
+        checkpoint_script,
+        "save_checkpoint",
+        unexpected_save,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="invalid or unreadable",
+    ):
+        checkpoint_script.main()
+
+    assert checkpoint_file.read_text(encoding="utf-8") == "{invalid JSON"
