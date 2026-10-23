@@ -546,3 +546,56 @@ def test_unauthenticated_user_cannot_access_private_document(
         assert document.category == "Testing"
     finally:
         db.close()
+
+
+def test_read_only_viewer_cannot_delete_document(setup_download_test):
+    test = setup_download_test
+    client = test["client"]
+    document_id = test["document_id"]
+
+    owner_headers = {
+        "Authorization": f"Bearer {test['owner_token']}"
+    }
+    viewer_headers = {
+        "Authorization": f"Bearer {test['viewer_token']}"
+    }
+
+    # Owner grants read-only access.
+    grant_response = client.post(
+        f"/documents/{document_id}/permissions",
+        headers=owner_headers,
+        json={
+            "username": "download_viewer",
+            "can_read": True,
+            "can_edit": False,
+        },
+    )
+    assert grant_response.status_code == 200
+
+    # Read-only viewer attempts to delete the document.
+    response = client.delete(
+        f"/documents/{document_id}",
+        headers=viewer_headers,
+    )
+    assert response.status_code == 404
+
+    # Verify the document still exists.
+    db = test["TestSession"]()
+    try:
+        document = db.get(Document, document_id)
+        assert document is not None
+        assert document.title == "Private Test Document"
+
+        # Verify the denied deletion was audited.
+        event = (
+            db.query(AuditLog)
+            .filter_by(
+                action="DOCUMENT_DELETE",
+                resource_id=str(document_id),
+                outcome="DENIED",
+            )
+            .first()
+        )
+        assert event is not None
+    finally:
+        db.close()
