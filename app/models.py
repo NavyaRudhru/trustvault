@@ -89,3 +89,52 @@ class AuditLog(Base):
     )
     previous_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entry_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+class DocumentAccessRequest(Base):
+    __tablename__ = "document_access_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "requester_id",
+            "status",
+            name="uq_access_request_document_requester_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    requester_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    requested_access: Mapped[str] = mapped_column(
+        String(10), nullable=False
+    )
+
+    reason: Mapped[str] = mapped_column(
+        String(500), nullable=False, default=""
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", index=True
+    )
+
+    reviewed_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )

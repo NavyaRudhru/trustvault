@@ -1,9 +1,11 @@
-
+from pathlib import Path
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-
+from app.access_requests import router as access_requests_router
 from app.admin import router as admin_router
 from app.audit import record_audit_event, verify_audit_chain
 from app.audit_checkpoint import (
@@ -38,18 +40,23 @@ app = FastAPI(
 app.include_router(documents_router)
 app.include_router(permissions_router)
 app.include_router(admin_router)
-
+app.include_router(access_requests_router)
 # Development convenience only.
 # Use database migrations in production.
 Base.metadata.create_all(bind=engine)
 
 
+app.mount(
+    "/static",
+    StaticFiles(directory=Path(__file__).resolve().parent / "static"),
+    name="static",
+)
+
+
 @app.get("/")
 def home():
-    return {
-        "application": "TrustVault",
-        "status": "running",
-    }
+    frontend_file = Path(__file__).resolve().parent / "static" / "index.html"
+    return FileResponse(frontend_file, media_type="text/html")
 
 
 @app.get("/health")

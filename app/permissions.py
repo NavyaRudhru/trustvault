@@ -413,3 +413,50 @@ def revoke_permission(
         "document_id": document_id,
         "username": target.username,
     }
+
+@router.get("/documents/{document_id}/permissions")
+def list_document_permissions_for_owner(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List access grants for the document owner only."""
+    document = db.get(Document, document_id)
+
+    if document is None or document.owner_id != current_user.id:
+        _audit_denial(
+            db,
+            action="PERMISSION_LIST",
+            document_id=document_id,
+            actor_id=current_user.id,
+            details="document_missing_or_actor_not_owner",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    rows = (
+        db.query(DocumentPermission, User)
+        .join(User, DocumentPermission.user_id == User.id)
+        .filter(DocumentPermission.document_id == document_id)
+        .order_by(DocumentPermission.id.desc())
+        .all()
+    )
+
+    return {
+        "document_id": document_id,
+        "items": [
+            {
+                "permission_id": permission.id,
+                "user_id": user.id,
+                "username": user.username,
+                "is_active": user.is_active,
+                "can_read": permission.can_read,
+                "can_edit": permission.can_edit,
+                "granted_by_id": permission.granted_by_id,
+                "created_at": permission.created_at,
+            }
+            for permission, user in rows
+        ],
+    }

@@ -1,0 +1,589 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#123c91">
+  <title>TrustVault | Secure Document Workspace</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <section id="auth-screen" class="auth-screen">
+    <div class="auth-art">
+      <div class="brand brand-light">
+        <span class="brand-icon">T</span>
+        <span>TrustVault</span>
+      </div>
+      <div class="auth-message">
+        <span class="eyebrow">YOUR SECURE WORKSPACE</span>
+        <h1>Your documents.<br>Under your control.</h1>
+        <p>Secure document management with controlled access and auditable activity.</p>
+        <div class="security-points">
+          <div>✓ Protected document access</div>
+          <div>✓ Owner-managed permissions</div>
+          <div>✓ Auditable activity history</div>
+          <div>✓ Access requests and approvals</div>
+        </div>
+      </div>
+      <div class="art-orb orb-one"></div>
+      <div class="art-orb orb-two"></div>
+    </div>
+
+    <div class="auth-panel">
+      <div class="auth-form-wrap">
+        <div class="brand brand-mobile">
+          <span class="brand-icon">T</span>
+          <span>TrustVault</span>
+        </div>
+
+        <div id="login-form">
+          <span class="eyebrow">WELCOME BACK</span>
+          <h2>Sign in to TrustVault</h2>
+          <p class="muted">Access your secure document workspace.</p>
+
+          <form id="login">
+            <label for="login-username">Username</label>
+            <input id="login-username" name="username"
+                   autocomplete="username" minlength="3"
+                   maxlength="80" required>
+
+            <label for="login-password">Password</label>
+            <input id="login-password" name="password"
+                   type="password" autocomplete="current-password"
+                   required>
+
+            <button class="btn btn-primary btn-full" type="submit">
+              Sign in <span>→</span>
+            </button>
+          </form>
+
+          <p class="auth-switch">
+            New to TrustVault?
+            <button id="show-register" type="button" class="link-btn">
+              Create account
+            </button>
+          </p>
+        </div>
+
+        <div id="register-form" hidden>
+          <span class="eyebrow">GET STARTED</span>
+          <h2>Create your account</h2>
+          <p class="muted">New accounts are registered with Viewer access.</p>
+
+          <form id="register">
+            <label for="register-username">Username</label>
+            <input id="register-username" name="username"
+                   minlength="3" maxlength="80"
+                   pattern="[A-Za-z0-9_.-]+"
+                   autocomplete="username" required>
+
+            <label for="register-email">Email</label>
+            <input id="register-email" name="email" type="email"
+                   maxlength="255" autocomplete="email" required>
+
+            <label for="register-password">Password</label>
+            <input id="register-password" name="password"
+                   type="password" minlength="12" maxlength="128"
+                   autocomplete="new-password" required>
+
+            <p class="field-hint">Use at least 12 characters.</p>
+
+            <button class="btn btn-primary btn-full" type="submit">
+              Create account <span>→</span>
+            </button>
+          </form>
+
+          <p class="auth-switch">
+            Already registered?
+            <button id="show-login" type="button" class="link-btn">
+              Sign in
+            </button>
+          </p>
+        </div>
+
+        <p class="auth-footer">TrustVault · Secure document management</p>
+      </div>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <aside id="sidebar" class="sidebar">
+      <div class="brand brand-light sidebar-brand">
+        <span class="brand-icon">T</span>
+        <span>TrustVault</span>
+      </div>
+
+      <div class="workspace-label">WORKSPACE</div>
+
+      <nav class="navigation">
+        <button class="nav-item active" data-page="dashboard" type="button">
+          <span>▦</span> Overview
+        </button>
+
+        <button class="nav-item" data-page="documents" type="button">
+          <span>▤</span> Documents
+        </button>
+
+        <button class="nav-item" data-page="sharing" type="button">
+          <span>⇄</span> Sharing &amp; Access
+        </button>
+
+        <button class="nav-item" data-page="access-requests" type="button">
+          <span>✉</span> Request Access
+        </button>
+
+        <div id="admin-nav" hidden>
+          <div class="workspace-label admin-label">ADMINISTRATION</div>
+          <button class="nav-item" data-page="audit" type="button">
+            <span>◷</span> Audit logs
+          </button>
+          <button class="nav-item" data-page="admin-permissions" type="button">
+            <span>♧</span> Access review
+          </button>
+        </div>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="sidebar-security">
+          <span class="status-dot"></span>
+          <div>
+            <strong>Security enabled</strong>
+            <small>API-enforced access controls</small>
+          </div>
+        </div>
+        <button id="logout" class="logout-btn" type="button">
+          ↪ <span>Sign out</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <button id="mobile-menu" class="icon-btn" type="button"
+                aria-label="Toggle navigation">☰</button>
+        <div class="breadcrumb">
+          Workspace <span>/</span>
+          <strong id="breadcrumb-page">Overview</strong>
+        </div>
+        <div class="topbar-user">
+          <div class="avatar" id="user-avatar">U</div>
+          <div class="topbar-identity">
+            <strong id="top-username">User</strong>
+            <small id="top-role">Viewer</small>
+          </div>
+        </div>
+      </header>
+
+      <div class="content">
+        <!-- DASHBOARD -->
+        <section id="page-dashboard" class="page">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">YOUR WORKSPACE</span>
+              <h1 id="welcome-title">Welcome back</h1>
+              <p>Manage documents and control who can access them.</p>
+            </div>
+            <button class="btn btn-primary" id="dashboard-upload" type="button">
+              ＋ Upload document
+            </button>
+          </div>
+
+          <div class="stat-grid">
+            <article class="stat-card">
+              <div class="stat-top">
+                <span>Total accessible documents</span>
+                <span class="stat-icon blue">▤</span>
+              </div>
+              <strong id="stat-documents">—</strong>
+              <small>Documents you can access</small>
+            </article>
+
+            <article class="stat-card">
+              <div class="stat-top">
+                <span>Owned documents</span>
+                <span class="stat-icon violet">▣</span>
+              </div>
+              <strong id="stat-owned">—</strong>
+              <small>Documents you own</small>
+            </article>
+
+            <article class="stat-card">
+              <div class="stat-top">
+                <span>Shared with you</span>
+                <span class="stat-icon teal">⇄</span>
+              </div>
+              <strong id="stat-shared">—</strong>
+              <small>Not owned by your account</small>
+            </article>
+          </div>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Recent documents</h2>
+                <p>Your latest accessible files</p>
+              </div>
+              <button class="text-btn" data-goto="documents" type="button">
+                View all →
+              </button>
+            </div>
+            <div id="recent-documents" class="table-wrap"></div>
+          </section>
+
+          <div class="notice">
+            <span>ⓘ</span>
+            <div>
+              <strong>Access is enforced by the server</strong>
+              <p>Document operations are checked by the existing TrustVault API, not just by the interface.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- DOCUMENTS -->
+        <section id="page-documents" class="page" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">FILE LIBRARY</span>
+              <h1>Documents</h1>
+              <p>Find, upload and manage your accessible documents.</p>
+            </div>
+            <button class="btn btn-primary" id="documents-upload" type="button">
+              ＋ Upload document
+            </button>
+          </div>
+
+          <section class="panel">
+            <div class="filter-grid">
+              <input id="search" placeholder="Search by title or filename…"
+                     aria-label="Search documents">
+              <input id="category-filter" placeholder="Category"
+                     aria-label="Filter category">
+              <input id="owner-filter" placeholder="Owner username"
+                     aria-label="Filter owner">
+              <input id="date-from" type="date" aria-label="From date">
+              <input id="date-to" type="date" aria-label="To date">
+
+              <button class="btn btn-secondary" id="apply-filters" type="button">
+                Search
+              </button>
+              <button class="btn btn-quiet" id="clear-filters" type="button">
+                Clear
+              </button>
+            </div>
+
+            <div id="document-list" class="table-wrap"></div>
+          </section>
+        </section>
+
+        <!-- SHARING -->
+        <section id="page-sharing" class="page" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">ACCESS CONTROL</span>
+              <h1>Sharing &amp; access</h1>
+              <p>Grant and revoke access to documents you own.</p>
+            </div>
+          </div>
+
+          <div class="notice">
+            <span>ⓘ</span>
+            <div>
+              <strong>Owner-controlled sharing</strong>
+              <p>Select a document you own to grant read or edit access to a registered username. Edit access also allows reading.</p>
+            </div>
+          </div>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Your documents</h2>
+                <p>Choose a document to manage its access.</p>
+              </div>
+            </div>
+            <div id="sharing-list" class="table-wrap"></div>
+          </section>
+
+          <section id="sharing-manager" class="panel" hidden>
+            <div class="panel-heading">
+              <div>
+                <h2 id="sharing-title">Manage access</h2>
+                <p>Granting access requires an existing username.</p>
+              </div>
+            </div>
+
+            <form id="grant-form" class="grant-form">
+              <input id="grant-username" placeholder="Registered username"
+                     minlength="3" maxlength="80"
+                     aria-label="Registered username" required>
+
+              <label class="check-label">
+                <input id="grant-read" type="checkbox"> Read access
+              </label>
+
+              <label class="check-label">
+                <input id="grant-edit" type="checkbox"> Edit access
+              </label>
+
+              <button class="btn btn-primary" type="submit">Grant access</button>
+            </form>
+
+            <p id="grant-hint" class="field-hint">
+              Choose read or edit access. Edit access includes reading.
+            </p>
+            <div id="current-grants" class="table-wrap"></div>
+          </section>
+        </section>
+
+        <!-- NEW: ACCESS REQUESTS -->
+        <section id="page-access-requests" class="page" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">CONTROLLED SHARING</span>
+              <h1>Request Access</h1>
+              <p>Ask a document owner for permission to read or edit a document.</p>
+            </div>
+          </div>
+
+          <div class="notice">
+            <span>ⓘ</span>
+            <div>
+              <strong>Access is not granted automatically</strong>
+              <p>Your request must be approved by the document owner. You need the document ID supplied by the owner. Do not enter passwords or other secrets here.</p>
+            </div>
+          </div>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Send an access request</h2>
+                <p>Choose the minimum access you need.</p>
+              </div>
+            </div>
+
+            <form id="request-access-form">
+              <label for="request-document-id">Document ID</label>
+              <input
+                id="request-document-id"
+                name="document_id"
+                type="number"
+                min="1"
+                step="1"
+                required
+                placeholder="Enter the document ID">
+
+              <label for="request-access-type">Requested permission</label>
+              <select id="request-access-type" name="requested_access" required>
+                <option value="read">Read only</option>
+                <option value="edit">Read and edit</option>
+              </select>
+
+              <label for="request-access-reason">Reason (optional)</label>
+              <textarea
+                id="request-access-reason"
+                name="reason"
+                maxlength="500"
+                rows="3"
+                placeholder="Explain why you need access"></textarea>
+
+              <div class="dialog-actions">
+                <button class="btn btn-primary" type="submit">
+                  Send access request
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2>My access requests</h2>
+                <p>Track requests you have submitted.</p>
+              </div>
+              <button id="refresh-my-access-requests"
+                      class="btn btn-secondary" type="button">
+                Refresh
+              </button>
+            </div>
+            <div id="my-access-requests" class="table-wrap">
+              Sign in to view your requests.
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Requests for my documents</h2>
+                <p>Approve or reject requests for documents you own.</p>
+              </div>
+              <button id="refresh-received-access-requests"
+                      class="btn btn-secondary" type="button">
+                Refresh
+              </button>
+            </div>
+            <div id="received-access-requests" class="table-wrap">
+              Sign in to view requests for your documents.
+            </div>
+          </section>
+        </section>
+
+        <!-- AUDIT LOGS -->
+        <section id="page-audit" class="page" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">SECURITY MONITORING</span>
+              <h1>Audit logs</h1>
+              <p>Review recorded activity and denied operations.</p>
+            </div>
+            <button id="verify-audit" class="btn btn-secondary" type="button">
+              Verify audit chain
+            </button>
+          </div>
+
+          <div id="audit-verification" class="notice" hidden></div>
+
+          <section class="panel">
+            <div class="filter-grid audit-filters">
+              <input id="audit-action" placeholder="Action filter"
+                     aria-label="Filter action">
+
+              <select id="audit-outcome" aria-label="Filter outcome">
+                <option value="">All outcomes</option>
+                <option value="SUCCESS">SUCCESS</option>
+                <option value="DENIED">DENIED</option>
+                <option value="FAILURE">FAILURE</option>
+              </select>
+
+              <button class="btn btn-secondary" id="apply-audit" type="button">
+                Apply filters
+              </button>
+              <button class="btn btn-quiet" id="refresh-audit" type="button">
+                Refresh
+              </button>
+            </div>
+
+            <div id="audit-list" class="table-wrap"></div>
+
+            <div class="pagination">
+              <button class="btn btn-quiet" id="audit-prev" type="button">
+                ← Previous
+              </button>
+              <span id="audit-page">Page 1</span>
+              <button class="btn btn-quiet" id="audit-next" type="button">
+                Next →
+              </button>
+            </div>
+          </section>
+        </section>
+
+        <!-- ADMIN ACCESS REVIEW -->
+        <section id="page-admin-permissions" class="page" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">ADMINISTRATION</span>
+              <h1>Access review</h1>
+              <p>Review permission grants without exposing document contents.</p>
+            </div>
+            <button class="btn btn-secondary" id="refresh-admin-permissions"
+                    type="button">Refresh</button>
+          </div>
+
+          <section class="panel">
+            <div id="admin-permissions-list" class="table-wrap"></div>
+          </section>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- UPLOAD DIALOG -->
+  <dialog id="upload-dialog" class="dialog">
+    <div class="dialog-heading">
+      <div>
+        <h2>Upload document</h2>
+        <p>Add a file to your secure workspace.</p>
+      </div>
+      <button class="icon-btn" data-close="upload-dialog" type="button"
+              aria-label="Close">✕</button>
+    </div>
+
+    <form id="upload-form">
+      <label for="upload-title">Document title</label>
+      <input id="upload-title" name="title" maxlength="200" required>
+
+      <label for="upload-category">Category</label>
+      <input id="upload-category" name="category" maxlength="100" required>
+
+      <label for="upload-file">Choose file</label>
+      <input id="upload-file" name="file" type="file" required>
+
+      <div class="dialog-actions">
+        <button class="btn btn-quiet" data-close="upload-dialog" type="button">
+          Cancel
+        </button>
+        <button class="btn btn-primary" type="submit">Upload</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- EDIT DIALOG -->
+  <dialog id="edit-dialog" class="dialog">
+    <div class="dialog-heading">
+      <div>
+        <h2>Edit document details</h2>
+        <p>Update the document title or category.</p>
+      </div>
+      <button class="icon-btn" data-close="edit-dialog" type="button"
+              aria-label="Close">✕</button>
+    </div>
+
+    <form id="edit-form">
+      <input id="edit-id" type="hidden">
+
+      <label for="edit-title">Document title</label>
+      <input id="edit-title" maxlength="200" required>
+
+      <label for="edit-category">Category</label>
+      <input id="edit-category" maxlength="100" required>
+
+      <div class="dialog-actions">
+        <button class="btn btn-quiet" data-close="edit-dialog" type="button">
+          Cancel
+        </button>
+        <button class="btn btn-primary" type="submit">Save changes</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- PREVIEW DIALOG -->
+  <dialog id="preview-dialog" class="dialog preview-dialog">
+    <div class="dialog-heading">
+      <div>
+        <span class="eyebrow">DOCUMENT VIEWER</span>
+        <h2 id="preview-title">File preview</h2>
+        <p id="preview-info">Loading file…</p>
+      </div>
+
+      <button class="icon-btn" id="close-preview" type="button"
+              aria-label="Close preview">✕</button>
+    </div>
+
+    <div id="preview-content" class="preview-content">
+      <p>Loading preview…</p>
+    </div>
+
+    <div class="dialog-actions">
+      <button class="btn btn-quiet" id="preview-close-bottom" type="button">
+        Close
+      </button>
+      <button class="btn btn-primary" id="preview-download" type="button">
+        Download file
+      </button>
+    </div>
+  </dialog>
+
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>

@@ -75,6 +75,10 @@ def record_audit_event(
     db.add(audit_entry)
     db.flush()
 
+# Tell the database session that a checkpoint update is needed
+# after the transaction successfully commits.
+    db.info["audit_checkpoint_pending"] = True
+
     return audit_entry
 
 

@@ -27,12 +27,14 @@ from app.permissions import require_document_read, require_document_edit
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
 STORAGE_DIR = Path(
     os.getenv(
         "TRUSTVAULT_STORAGE_DIR",
         str(BASE_DIR / "storage"),
     )
 ).resolve()
+
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 ALLOWED_EXTENSIONS = {".pdf", ".txt", ".png", ".jpg", ".jpeg"}
@@ -88,6 +90,7 @@ def validate_file_content(extension: str, content: bytes) -> bool:
     if extension == ".txt":
         if b"\x00" in content:
             return False
+
         try:
             content.decode("utf-8")
             return True
@@ -97,8 +100,26 @@ def validate_file_content(extension: str, content: bytes) -> bool:
     return False
 
 
-def document_response(document: Document) -> dict:
-    """Return metadata without exposing the internal storage key."""
+def document_response(
+    document: Document,
+    user: User,
+    db: Session,
+) -> dict:
+    """Return safe document metadata and the current user's permissions."""
+
+    can_edit = document.owner_id == user.id
+
+    if not can_edit:
+        permission = (
+            db.query(DocumentPermission)
+            .filter_by(
+                document_id=document.id,
+                user_id=user.id,
+            )
+            .first()
+        )
+        can_edit = bool(permission and permission.can_edit)
+
     return {
         "id": document.id,
         "title": document.title,
@@ -107,7 +128,54 @@ def document_response(document: Document) -> dict:
         "size_bytes": document.size_bytes,
         "owner_id": document.owner_id,
         "created_at": document.created_at,
+        "can_edit": can_edit,
     }
+
+def get_safe_storage_path(storage_key: str) -> Path:
+    """
+    Resolve a storage key and ensure it points directly inside STORAGE_DIR.
+    Reject traversal, directory paths, and paths resolving outside the root.
+    """
+    storage_root = STORAGE_DIR.resolve()
+    storage_path = (storage_root / storage_key).resolve()
+
+    if (
+        storage_path == storage_root
+        or storage_path.parent != storage_root
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail="Invalid document storage path.",
+        )
+
+    return storage_path
+
+
+def record_denied_document_action(
+    db: Session,
+    current_user: User,
+    action: str,
+    document_id: int,
+    details: str,
+) -> None:
+    """Persist a denied document action before returning an error."""
+    try:
+        record_audit_event(
+            db=db,
+            actor_id=current_user.id,
+            action=action,
+            resource_type="DOCUMENT",
+            resource_id=str(document_id),
+            outcome="DENIED",
+            details=details,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Denied action could not be audited.",
+        ) from None
 
 
 @router.post("/", status_code=201)
@@ -178,8 +246,9 @@ def upload_document(
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
         storage_key = f"{uuid.uuid4().hex}{extension}"
-        storage_path = STORAGE_DIR / storage_key
+        storage_path = get_safe_storage_path(storage_key)
 
+        # Exclusive creation prevents accidental overwrite.
         with storage_path.open("xb") as stored_file:
             file_created = True
             stored_file.write(content)
@@ -211,7 +280,7 @@ def upload_document(
         db.commit()
         transaction_committed = True
 
-        return document_response(document)
+        return document_response(document, current_user, db)
 
     except HTTPException as exc:
         db.rollback()
@@ -312,14 +381,17 @@ def list_documents(
             .replace("%", "\\%")
             .replace("_", "\\_")
         )
+
         query = query.filter(
-            Document.category.ilike(f"%{term}%", escape="\\")
+            Document.category.ilike(
+                f"%{term}%",
+                escape="\\",
+            )
         )
 
     if owner and owner.strip():
-        owner_ids = (
-            db.query(User.id)
-            .filter(User.username.ilike(owner.strip()))
+        owner_ids = db.query(User.id).filter(
+            User.username.ilike(owner.strip())
         )
         query = query.filter(Document.owner_id.in_(owner_ids))
 
@@ -335,8 +407,11 @@ def list_documents(
         )
 
     documents = query.order_by(Document.created_at.desc()).all()
-    return [document_response(doc) for doc in documents]
 
+    return [
+    document_response(doc, current_user, db)
+    for doc in documents
+]
 
 @router.get("/{document_id}")
 def get_document_metadata(
@@ -345,8 +420,12 @@ def get_document_metadata(
     db: Session = Depends(get_db),
 ):
     """Return metadata only when the user has read permission."""
-    document = require_document_read(document_id, current_user, db)
-    return document_response(document)
+    document = require_document_read(
+        document_id,
+        current_user,
+        db,
+    )
+    return document_response(document, current_user, db)
 
 
 @router.patch("/{document_id}")
@@ -358,7 +437,11 @@ def update_document(
 ):
     """Update metadata only when the user has edit permission."""
 
-    document = require_document_edit(document_id, current_user, db)
+    document = require_document_edit(
+        document_id,
+        current_user,
+        db,
+    )
 
     title = data.title.strip()
     category = data.category.strip()
@@ -398,7 +481,7 @@ def update_document(
             detail="Document update failed.",
         ) from None
 
-    return document_response(document)
+    return document_response(document, current_user, db)
 
 
 @router.delete("/{document_id}")
@@ -407,44 +490,47 @@ def delete_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Only the owner can delete a document."""
-
+    """
+    Delete only an owner's document.
+    Stage the physical file until the database transaction commits.
+    """
     document = db.get(Document, document_id)
 
     if document is None or document.owner_id != current_user.id:
-        try:
-            record_audit_event(
-                db=db,
-                actor_id=current_user.id,
-                action="DOCUMENT_DELETE",
-                resource_type="DOCUMENT",
-                resource_id=str(document_id),
-                outcome="DENIED",
-                details="Document deletion denied: requester is not the owner.",
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise HTTPException(
-                status_code=500,
-                detail="Deletion denial could not be audited.",
-            ) from None
+        record_denied_document_action(
+            db=db,
+            current_user=current_user,
+            action="DOCUMENT_DELETE",
+            document_id=document_id,
+            details="Document deletion denied: requester is not the owner.",
+        )
 
         raise HTTPException(
             status_code=404,
             detail="Document not found.",
         )
 
+    storage_path = get_safe_storage_path(document.storage_key)
     storage_root = STORAGE_DIR.resolve()
-    storage_path = (storage_root / document.storage_key).resolve()
 
-    if storage_path.parent != storage_root:
-        raise HTTPException(
-            status_code=500,
-            detail="Invalid document storage path.",
-        )
+    staged_path = storage_root / (
+        f".{storage_path.name}.deleting-{uuid.uuid4().hex}"
+    )
+
+    file_staged = False
 
     try:
+        if storage_path.exists():
+            if not storage_path.is_file():
+                raise HTTPException(
+                    status_code=500,
+                    detail="Document storage entry is not a regular file.",
+                )
+
+            # Move the file aside so it can be restored if DB commit fails.
+            os.replace(storage_path, staged_path)
+            file_staged = True
+
         record_audit_event(
             db=db,
             actor_id=current_user.id,
@@ -462,17 +548,30 @@ def delete_document(
         db.delete(document)
         db.commit()
 
-    except Exception:
+    except Exception as exc:
         db.rollback()
+
+        if file_staged:
+            try:
+                os.replace(staged_path, storage_path)
+            except OSError:
+                # Keep the staged file for manual recovery if restoration fails.
+                pass
+
+        if isinstance(exc, HTTPException):
+            raise
+
         raise HTTPException(
             status_code=500,
             detail="Document deletion failed.",
         ) from None
 
-    if storage_path.is_file():
+    # Database deletion succeeded. Remove the staged file afterward.
+    if file_staged:
         try:
-            storage_path.unlink()
+            staged_path.unlink()
         except OSError:
+            # The database record is gone; a staged file may need cleanup.
             pass
 
     return {
@@ -496,30 +595,26 @@ def download_document(
         audit_action="DOCUMENT_DOWNLOAD",
     )
 
-    storage_root = STORAGE_DIR.resolve()
-    storage_path = (storage_root / document.storage_key).resolve()
+    try:
+        storage_path = get_safe_storage_path(document.storage_key)
+    except HTTPException:
+        record_denied_document_action(
+            db=db,
+            current_user=current_user,
+            action="DOCUMENT_DOWNLOAD",
+            document_id=document_id,
+            details="Stored file path is invalid.",
+        )
+        raise
 
-    if (
-        storage_path.parent != storage_root
-        or not storage_path.is_file()
-    ):
-        try:
-            record_audit_event(
-                db=db,
-                actor_id=current_user.id,
-                action="DOCUMENT_DOWNLOAD",
-                resource_type="DOCUMENT",
-                resource_id=str(document_id),
-                outcome="DENIED",
-                details="Stored file is missing or its path is invalid.",
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise HTTPException(
-                status_code=500,
-                detail="Download failure could not be audited.",
-            ) from None
+    if not storage_path.is_file():
+        record_denied_document_action(
+            db=db,
+            current_user=current_user,
+            action="DOCUMENT_DOWNLOAD",
+            document_id=document_id,
+            details="Stored document file is missing.",
+        )
 
         raise HTTPException(
             status_code=404,
@@ -537,6 +632,7 @@ def download_document(
             details=f"Download authorized for document: {document.title}",
         )
         db.commit()
+
     except Exception:
         db.rollback()
         raise HTTPException(
