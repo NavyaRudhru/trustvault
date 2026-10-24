@@ -1,4 +1,5 @@
 
+import os
 import uuid
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -26,7 +27,12 @@ from app.permissions import require_document_read, require_document_edit
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-STORAGE_DIR = BASE_DIR / "storage"
+STORAGE_DIR = Path(
+    os.getenv(
+        "TRUSTVAULT_STORAGE_DIR",
+        str(BASE_DIR / "storage"),
+    )
+).resolve()
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 ALLOWED_EXTENSIONS = {".pdf", ".txt", ".png", ".jpg", ".jpeg"}

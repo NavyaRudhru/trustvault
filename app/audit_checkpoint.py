@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
+
 def get_checkpoint_secret() -> bytes:
     """Load the secret used to authenticate audit checkpoints."""
     secret = os.getenv("AUDIT_CHECKPOINT_SECRET")
@@ -20,10 +21,8 @@ def get_checkpoint_secret() -> bytes:
 
 def sign_checkpoint(checkpoint_data: str) -> str:
     """Create an HMAC-SHA256 signature for checkpoint data."""
-    secret = get_checkpoint_secret()
-
     return hmac.new(
-        secret,
+        get_checkpoint_secret(),
         checkpoint_data.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
@@ -33,13 +32,10 @@ def verify_checkpoint_signature(
     checkpoint_data: str,
     signature: str,
 ) -> bool:
-    """Verify a checkpoint signature without timing-sensitive comparison."""
+    """Verify a checkpoint signature."""
     expected_signature = sign_checkpoint(checkpoint_data)
-
     return hmac.compare_digest(expected_signature, signature)
 
-
-import json
 
 def create_checkpoint(audit_id: int, entry_hash: str) -> dict:
     """Create a signed checkpoint for an audit-chain position."""
@@ -75,8 +71,19 @@ def verify_checkpoint(checkpoint: dict) -> bool:
             checkpoint_data,
             checkpoint["signature"],
         )
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, RuntimeError):
         return False
+
+
+def _checkpoint_directory(directory: str | None = None) -> Path:
+    """Resolve the same checkpoint directory for saving and loading."""
+    default_dir = Path(__file__).resolve().parent.parent / "audit_checkpoints"
+
+    return Path(
+        directory
+        if directory is not None
+        else os.getenv("AUDIT_CHECKPOINT_DIR", str(default_dir))
+    ).resolve()
 
 
 def save_checkpoint(checkpoint: dict, directory: str | None = None) -> Path:
@@ -86,11 +93,7 @@ def save_checkpoint(checkpoint: dict, directory: str | None = None) -> Path:
     if not verify_checkpoint(checkpoint):
         raise ValueError("Cannot save an invalid checkpoint.")
 
-    checkpoint_dir = (
-        Path(directory)
-        if directory is not None
-        else Path(__file__).resolve().parent.parent / "audit_checkpoints"
-    )
+    checkpoint_dir = _checkpoint_directory(directory)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint_path = checkpoint_dir / "latest.json"
@@ -112,12 +115,7 @@ def save_checkpoint(checkpoint: dict, directory: str | None = None) -> Path:
 
 def load_checkpoint(directory: str | None = None) -> dict | None:
     """Load and verify the saved checkpoint."""
-    checkpoint_dir = (
-        Path(directory)
-        if directory is not None
-        else Path(__file__).resolve().parent.parent / "audit_checkpoints"
-    )
-    checkpoint_path = checkpoint_dir / "latest.json"
+    checkpoint_path = _checkpoint_directory(directory) / "latest.json"
 
     if not checkpoint_path.is_file():
         return None
@@ -129,7 +127,7 @@ def load_checkpoint(directory: str | None = None) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
 
-    if not verify_checkpoint(checkpoint):
+    if not isinstance(checkpoint, dict) or not verify_checkpoint(checkpoint):
         return None
 
     return checkpoint
