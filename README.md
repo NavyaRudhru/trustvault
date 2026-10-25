@@ -157,6 +157,38 @@ TrustVault was tested to validate its core functionality, access control, and se
 
 The main application workflows were tested in the deployed environment. Security-related tests should be repeated after significant code changes to ensure that authorization and document access restrictions continue to work correctly.
 
+## Demo Accounts
+
+Use the following demo accounts to explore TrustVault's role-based access control and document-sharing functionality.
+
+Demo Accounts
+
+- Owner: 
+username:`demo_owner`
+password:owner@123456
+ — Upload documents and manage document permissions.
+
+- Viewer 1: 
+username:`demo_viewer1` 
+password:ViewerDemo1@2026Pass
+— Test access to documents shared with an authorized viewer.
+
+- Viewer 2: 
+username:`demo_viewer2`
+password:ViewerDemo2@2026Pass
+ — Test access restrictions for a viewer without permission.
+
+### How to Test
+
+1. Sign in using an authorized demo account.
+2. Upload a sample document using the Owner account.
+3. Grant read access to `demo_viewer1`.
+4. Sign in as `demo_viewer1` and verify access to the shared document.
+5. Sign in as `demo_viewer2` and verify that access is denied when no permission has been granted.
+6. Revoke an existing permission and verify that subsequent access is denied.
+
+**Security note:** These are demonstration accounts, not production accounts. Never use real personal documents or reuse personal passwords during testing.
+
 ## Project Objective
 
 The objective of TrustVault is to demonstrate secure document sharing through authentication, role-based authorization, fine-grained access control, and activity auditing.
