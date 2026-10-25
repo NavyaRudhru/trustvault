@@ -1,197 +1,168 @@
-﻿# TrustVault
+﻿# TrustVault — Secure Document Sharing Platform
 
-**Security-first document management with fine-grained access control and tamper-evident auditing.**
+TrustVault is a security-focused document-sharing platform built with FastAPI and PostgreSQL. It enables users to upload and manage documents, control document-level access permissions, and track important activities through audit logs.
 
-TrustVault is a document-sharing platform designed to protect files through authentication, document-level permissions, server-side authorization, upload validation, and audit logging.
+## Key Features
 
-## Features
-
-- User registration and authentication.
-- Role-based administrator access.
-- Document ownership and per-document read/edit permissions.
-- Granting and revoking document access.
-- Document upload, organization, and search capabilities.
-- Upload validation, allowed file types, and file-size restrictions.
-- Audit logging for security-sensitive actions and denied operations.
-- Hash-chain audit integrity verification and signed audit checkpoints.
-- Administrator endpoints for reviewing audit events and document permissions.
-- Automated tests for authentication, authorization, and document isolation.
+- **Authentication:** Secure user authentication.
+- **Role-Based Access Control:** Supports Admin, Owner, and Viewer roles.
+- **Document Management:** Upload, organize, search, and manage documents.
+- **Granular Permissions:** Grant or revoke document access for specific users.
+- **Read and Edit Access:** Control what authorized users can do with shared documents.
+- **Access Enforcement:** Prevent unauthorized users from accessing documents or performing restricted actions.
+- **Audit Logging:** Record important activities, including document uploads, downloads, changes, deletions, permission changes, and denied access attempts.
+- **Document Access Requests:** Support a workflow for requesting access to documents.
+- **API Documentation:** Explore and test API endpoints using FastAPI's Swagger UI.
+- **Cloud Deployment:** Deployed using Render with a PostgreSQL database.
 
 ## Technology Stack
 
-- Python
-- FastAPI
-- SQLAlchemy
-- SQLite for local development
-- Argon2 password hashing
-- Signed bearer tokens
-- Pytest
+| Component         | Technology                 |
+| ----------------- | -------------------------- |
+| Backend           | Python, FastAPI            |
+| Database          | PostgreSQL                 |
+| ORM               | SQLAlchemy                 |
+| Authentication    | Token-based authentication |
+| Password Security | Argon2 password hashing    |
+| API Documentation | Swagger UI / OpenAPI       |
+| Deployment        | Render                     |
+| Version Control   | Git and GitHub             |
 
-Check `requirements.txt` for the exact dependency versions.
+## Architecture Overview
 
-## User Roles and Access Model
+1. The client sends requests to the FastAPI application.
+2. The application authenticates the user and checks their permissions.
+3. SQLAlchemy communicates with PostgreSQL to manage application data.
+4. Document operations are restricted according to user roles and document-level permissions.
+5. Audit logs record relevant security and document activities.
 
-| Role or relationship | Description |
-|---|---|
-| Administrator | Can access administrator-only audit and permission review endpoints. |
-| Document owner | The user who owns a document and can manage its sharing permissions, subject to server-side authorization. |
-| Viewer | The default role assigned through public registration. Access to shared documents depends on the permissions granted. |
-| Authorized editor | A user with edit permission for a particular document. Edit access also requires read access. |
+## Getting Started
 
-Document ownership and sharing permissions are checked on the server. Hiding a button in the user interface is not a substitute for authorization.
+### Prerequisites
 
-Public registration assigns the viewer role. Administrator accounts must be provisioned securely; public registration must not allow users to promote themselves to administrator.
+- Python 3.10 or a compatible supported version
+- PostgreSQL
+- Git
 
-## Requirements
+### 1. Clone the repository
 
-- Python installed.
-- Git installed.
-- A terminal such as PowerShell.
-- A local copy of this repository.
+```bash
+git clone https://github.com/NavyaRudhru/trustvault.git
+cd trustvault
+```
 
-## Installation and Local Setup
+### 2. Create a virtual environment
 
-Open PowerShell in the project directory.
-
-### 1. Create and activate a virtual environment
+**Windows PowerShell:**
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-If PowerShell blocks activation, use Command Prompt or configure your local PowerShell execution policy appropriately.
+### 3. Install dependencies
 
-### 2. Install dependencies
-
-```powershell
-python -m pip install --upgrade pip
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment variables
+### 4. Configure environment variables
 
-Review `.env.example` before configuring the application.
+Configure the required environment variables in your local environment:
 
-Configure the secrets and database settings required by your local application. In particular, use a strong, private `SESSION_SECRET` and configure `AUDIT_CHECKPOINT_SECRET` with at least 32 characters of secret material when using audit checkpoints.
+- `DATABASE_URL` — PostgreSQL connection URL
+- `SESSION_SECRET` — Secret used for session/token security
+- `AUDIT_CHECKPOINT_SECRET` — Secret used for audit checkpoint operations
+- `APP_ENV` — Set to `production` for production deployment
 
-Do not commit real secrets, production credentials, or private environment files to GitHub. Use separate secrets for development and production.
+Use strong, unique secrets. Never commit credentials, database URLs, or secret keys to GitHub.
 
-The application uses SQLite by default for local development. Confirm the database configuration in `app/database.py` before changing it.
+### 5. Run the application
 
-### 4. Start the application
-
-```powershell
-python -m uvicorn app.main:app --reload
+```bash
+uvicorn app.main:app --reload
 ```
 
-The local server normally starts at:
+Open the local API documentation:
 
-http://127.0.0.1:8000
+`http://127.0.0.1:8000/docs`
 
-Interactive API documentation:
+## Demo Accounts
 
-http://127.0.0.1:8000/docs
+The application supports different roles for testing access control.
 
-OpenAPI schema:
+- **Owner:** Manages documents and grants or revokes document permissions.
+- **Viewer:** Accesses documents according to the permissions granted to them.
+- **Admin:** Performs administrative actions allowed by the application's role policies.
 
-http://127.0.0.1:8000/openapi.json
+Create demo accounts through the registration endpoint or the project's authorized account-provisioning procedure. Public registration creates Viewer accounts.
 
-Do not expose the development server directly to the public internet.
+**Security note:** Do not publish demo passwords or production credentials in this repository.
 
-## Important API Endpoints
+## Security Considerations
 
-The following endpoints are defined in the application:
+- Enforce authorization checks on every protected document operation.
+- Do not rely only on frontend restrictions; validate permissions on the backend.
+- Store passwords as secure hashes rather than plaintext.
+- Keep secrets and database credentials outside source control.
+- Record security-sensitive actions in audit logs.
+- Test both authorized and unauthorized access scenarios.
+- Review database backups, audit-log integrity, and persistent storage before production use.
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/` | Root endpoint |
-| GET | `/health` | Health check |
-| POST | `/auth/register` | Register a viewer account |
-| POST | `/auth/login` | Authenticate a user |
-| GET | `/me` | Get the authenticated user's information |
-| GET | `/admin/audit` | List audit events; administrator access required |
-| GET | `/admin/permissions` | Review document permissions; administrator access required |
-| GET | `/admin/audit/verify` | Verify audit-chain integrity; administrator access required |
+## Deployment
 
-Document-management and permission-management routes are also provided by the application. Use `/docs` to inspect the exact paths, request formats, and response schemas exposed by the running version.
+TrustVault is deployed on Render.
 
-### Authentication and authorization
+- **Live Application:** [https://trustvault-n4za.onrender.com](https://trustvault-n4za.onrender.com)
+- **API Documentation:** [https://trustvault-n4za.onrender.com/docs](https://trustvault-n4za.onrender.com/docs)
+- **Health Endpoint:** [https://trustvault-n4za.onrender.com/health](https://trustvault-n4za.onrender.com/health)
 
-- Authenticate through the login endpoint and use the returned authentication token as required by the API.
-- Protected endpoints must verify the authenticated user on the server.
-- Document access must be checked for every applicable read, download, edit, and delete request.
-- Owners can grant or revoke document permissions according to the application's authorization rules.
-- Denied access attempts should be audited.
-- Never assume that knowing a document ID grants access to that document.
+The deployed application uses a PostgreSQL database configured through the `DATABASE_URL` environment variable.
 
-## File Upload Security
+## Testing and Validation
 
-The application validates uploaded files before accepting them.
+TrustVault was tested to validate its core functionality, access control, and security behavior.
 
-The current implementation is intended to restrict uploads to PDF, TXT, PNG, JPG, and JPEG files, with a maximum file size of 10 MB. It also uses UUID-based stored filenames and basic file-signature checks.
+### 1. Authentication Testing
+- Verified user registration and login.
+- Confirmed that public registration creates Viewer accounts.
+- Tested access to protected endpoints without valid authentication.
 
-File extensions and signatures alone cannot guarantee that a file is safe. Production deployments should add appropriate malware scanning, resource limits, and isolated storage.
+### 2. Document Management Testing
+- Tested document upload and listing.
+- Verified document access based on assigned permissions.
+- Tested document management operations for authorized users.
 
-## Audit Logging and Integrity
+### 3. Access Control Testing
+- Verified document access for users with granted permissions.
+- Tested access denial for users without permission.
+- Checked permission granting and revocation.
+- Verified that Viewer accounts cannot perform unauthorized owner-level operations.
 
-TrustVault uses audit events to record security-relevant operations.
+### 4. Audit Logging Testing
+- Checked audit records for document-related activities.
+- Tested logging of permission changes and denied access attempts.
+- Verified that relevant events are recorded for security review.
 
-The audit system includes hash-chain verification and signed checkpoints intended to help detect unauthorized modification of audit history.
+### 5. Document Access Request Testing
+- Tested the document access request workflow.
+- Verified that requests follow the application's configured authorization rules.
 
-Audit integrity checks do not independently guarantee that every event was recorded, that a compromised application cannot forge events, or that checkpoint secrets remain secure. Production deployments need protected secret storage, restricted database access, and independent audit backups.
+### 6. Deployment Testing
+- Verified that the application is accessible on Render.
+- Checked the API documentation through Swagger UI.
+- Confirmed database connectivity in the deployed environment.
 
-## Run the Tests
+### Testing Outcome
 
-From the project root, with the virtual environment activated:
+The main application workflows were tested in the deployed environment. Security-related tests should be repeated after significant code changes to ensure that authorization and document access restrictions continue to work correctly.
 
-```powershell
-python -m pytest -q
-```
+## Project Objective
 
-The project has previously passed a local test run with 80 tests. Run the tests against your current checkout to confirm its present status.
+The objective of TrustVault is to demonstrate secure document sharing through authentication, role-based authorization, fine-grained access control, and activity auditing.
 
-Tests are important, but passing tests alone does not establish that the application is production-ready or that every possible authorization bypass has been eliminated.
+GitHub: [https://github.com/NavyaRudhru](https://github.com/NavyaRudhru)
 
-## Project Structure
+---
 
-```text
-trustvault/
-├── app/
-│   ├── main.py
-│   ├── admin.py
-│   ├── documents.py
-│   └── permissions.py
-├── audit_checkpoints/
-├── scripts/
-├── storage/
-├── tests/
-├── .env.example
-├── .gitignore
-├── requirements.txt
-├── README.md
-├── THREATS.md
-└── PROMPTS.md
-```
-
-The repository may contain additional application modules and tests not listed above.
-
-## Security Notes
-
-- Never commit `.env` files, passwords, tokens, or production secrets.
-- Do not use real personal documents for public demonstrations.
-- Configure secure secrets before deployment.
-- Use HTTPS and secure hosting for any public instance.
-- Restrict access to uploaded files, the database, and audit checkpoints.
-- Test denied requests as well as successful requests.
-- Review `THREATS.md` for the threat model and known limitations.
-
-## Deployment and Demo Status
-
-This README documents local development and the application's intended security model. A public production URL, seeded demonstration accounts, and production deployment instructions must be added only after they have actually been configured and verified.
-
-Do not publish administrator passwords or reuse development secrets in a public demo.
-
-## License
-
-Add the project's chosen license before distributing the software under an open-source license.
+*TrustVault — Share documents securely. Control access precisely. Track activity transparently.*
