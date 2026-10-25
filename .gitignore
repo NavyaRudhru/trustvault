@@ -13,3 +13,4 @@ htmlcov/
 trustvault.db
 audit_checkpoints/*
 !audit_checkpoints/.gitkeep
+app/create_owner.py

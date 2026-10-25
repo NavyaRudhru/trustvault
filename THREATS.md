@@ -1,214 +1,157 @@
-﻿# TrustVault Threat Model
+﻿# TrustVault — Threat Model
 
 ## 1. Purpose
 
-TrustVault is a security-focused document-sharing application. This document identifies important security threats, existing protections, and remaining risks.
+TrustVault is a document-sharing application designed to let authenticated users upload, organize, access, and share documents with specific users. This threat model describes the assets, trust boundaries, potential attacks, and security controls relevant to the application.
 
-The threat model should be updated whenever authentication, authorization, file storage, or audit functionality changes.
+This document describes intended protections. A control should be considered verified only after its implementation and relevant tests have been inspected.
 
 ## 2. Assets to Protect
 
-- User accounts and password hashes.
-- Authentication tokens and application secrets.
-- Uploaded documents and their contents.
-- Document ownership and access permissions.
-- Audit events and audit checkpoints.
-- Database records and application configuration.
-- Administrator capabilities.
+- Document contents and downloaded files.
+- User credentials, authentication tokens, and account information.
+- Document ownership and sharing permissions.
+- Access requests and approval decisions.
+- Audit records, including denied access attempts.
+- Database integrity and document metadata.
+- Application secrets and deployment configuration.
 
 ## 3. Trust Boundaries
 
-1. **Unauthenticated users:** Must not access protected account or document operations.
-2. **Authenticated users:** Must only access resources permitted by their role and document permissions.
-3. **Document owners:** May manage sharing permissions for documents they own, subject to server-side checks.
-4. **Administrators:** May access administrator-only audit and permission review endpoints.
-5. **Application and storage:** The server must enforce access rules independently of the user interface.
-6. **External environment:** Uploaded files, client requests, environment variables, and database files must not automatically be trusted.
+1. **Unauthenticated user → application:** A user must authenticate before accessing protected resources.
+2. **Authenticated user → document:** Being logged in must not automatically grant access to every document.
+3. **Viewer → editor operations:** Read access must not imply permission to modify, share, or delete a document.
+4. **Document owner → shared user:** Access must be restricted to the permissions granted for the particular document.
+5. **Application → database and file storage:** Database queries and storage operations must enforce the same document-level authorization decisions.
+6. **Application → audit records:** Users must not be able to rewrite or delete audit history through ordinary application endpoints.
 
 ## 4. Threats and Mitigations
 
-### Threat 1: Unauthorized account access
+### T1. Cross-user document access (IDOR/BOLA)
 
-**Risk:** An attacker guesses, steals, or obtains a user's password or authentication token.
+**Threat:** A user changes a document ID in a URL or request body to access another user's private document.
 
-**Existing protections:**
-- Password hashing using Argon2.
-- Minimum password length enforced by the application.
-- Authentication tokens used for protected operations.
-- Login rate limiting and audit events for relevant login outcomes.
+**Impact:** Confidential documents may be exposed, modified, or deleted.
 
-**Remaining risks and actions:**
-- Use HTTPS in deployed environments.
-- Store secrets outside source control.
-- Review token expiration, invalidation, and signing-key rotation.
-- Test brute-force resistance and account lifecycle behavior.
+**Mitigation:** Authenticate the caller and check document ownership or an explicit document-level grant on every protected operation. Do not rely on hiding document IDs in the interface.
 
-### Threat 2: Privilege escalation
+**Verification needed:** Automated tests using two separate users must attempt to list, read, download, edit, share, and delete each other's documents without permission.
 
-**Risk:** A viewer registers as an administrator or accesses administrator-only functionality.
+### T2. Privilege escalation
 
-**Existing protections:**
-- Public registration assigns the viewer role.
-- Administrator endpoints check the authenticated user's role and active status.
+**Threat:** A viewer or ordinary user submits an edit, delete, permission-grant, or administrative request directly to the API.
 
-**Remaining risks and actions:**
-- Verify how the first administrator is provisioned.
-- Test attempts to change roles through registration, profile updates, and direct API requests.
-- Ensure administrative privileges cannot be granted through client-controlled fields.
+**Impact:** Unauthorized modification, deletion, or disclosure of documents.
 
-### Threat 3: Unauthorized document access
+**Mitigation:** Enforce role and resource-level permissions on the server for every operation. Frontend visibility and disabled buttons are not security controls.
 
-**Risk:** A user guesses or obtains a document ID and reads or downloads a document without permission.
+**Verification needed:** Test each restricted endpoint with a low-privilege account, including requests made outside the browser interface.
 
-**Existing protections:**
-- Document-level authorization helpers.
-- Ownership and sharing permission checks.
-- Denied access audit events in relevant authorization paths.
+### T3. Revoked access remains usable
 
-**Remaining risks and actions:**
-- Test every document read, download, update, and delete route.
-- Test direct requests using another user's document IDs.
-- Verify that file contents and storage paths cannot be retrieved through alternate routes.
-- Ensure failed authorization cannot be bypassed through search, previews, or metadata endpoints.
+**Threat:** A user continues accessing a document after the owner revokes their grant.
 
-### Threat 4: Unauthorized permission changes
+**Impact:** Continued unauthorized access.
 
-**Risk:** A viewer or unrelated user grants access to a document, changes another user's permissions, or revokes a legitimate user's access.
+**Mitigation:** Recheck current permissions on every document operation. Avoid relying on stale frontend state or indefinitely cached authorization decisions.
 
-**Existing protections:**
-- Permission-management operations check document ownership.
-- Permission grants validate the target account and requested access.
-- Permission grant and revoke operations generate audit events in the relevant code paths.
+**Verification needed:** Grant access, confirm the permitted operation, revoke access, then retry reading, downloading, editing, and deleting.
 
-**Remaining risks and actions:**
-- Test unauthorized grants and revocations.
-- Verify that edit access always includes read access.
-- Verify that revoked access stops working on the next protected request.
-- Test simultaneous permission changes and document operations.
+### T4. Insecure access-request approval
 
-### Threat 5: Malicious or invalid uploads
+**Threat:** A requester approves their own request, approves a request belonging to another document, or reviews a request without the required authority.
 
-**Risk:** An attacker uploads an oversized, malformed, or dangerous file.
+**Impact:** Unauthorized permissions may be granted.
 
-**Existing protections:**
-- File extension allowlist.
-- Maximum upload size of 10 MB in the current implementation.
-- Basic file-signature validation.
-- UUID-based stored filenames.
+**Mitigation:** Validate the request's document, requester, status, and reviewing user's authority on the server. Approval should grant only the requested and permitted access level.
 
-**Remaining risks and actions:**
-- File signatures and extensions do not prove a file is harmless.
-- Consider malware scanning and stricter content validation.
-- Prevent path traversal and executable-file exposure.
-- Apply upload limits at the application and hosting layers.
-- Test malformed files, mismatched extensions, and oversized uploads.
+**Verification needed:** Test self-approval, review by an unrelated user, duplicate approval, rejected requests, and attempts to change a reviewed request.
 
-### Threat 6: Audit log tampering
+### T5. Authentication and session compromise
 
-**Risk:** An attacker modifies or removes audit records to hide unauthorized activity.
+**Threat:** Weak credentials, leaked tokens, or improperly handled sessions allow an attacker to impersonate a user.
 
-**Existing protections:**
-- Hash-chain audit integrity verification.
-- Signed audit checkpoints.
-- A verification endpoint restricted to administrators.
+**Impact:** Account takeover and unauthorized document access.
 
-**Remaining risks and actions:**
-- Protect checkpoint signing secrets.
-- Restrict database and checkpoint-file access.
-- Keep protected, independent backups of audit records.
-- Test modified records, deleted records, invalid checkpoints, and rollback scenarios.
-- A hash chain does not by itself prevent a sufficiently privileged attacker from rewriting the database and recomputing hashes.
-- Verify that security-sensitive operations fail safely if required audit persistence fails.
+**Mitigation:** Use appropriate password hashing, secure token handling, secret management, and HTTPS in deployment. Do not commit credentials or production secrets.
 
-### Threat 7: Sensitive information leakage
+**Verification needed:** Inspect authentication code and configuration; test invalid credentials, expired or invalid tokens where supported, and access after logout.
 
-**Risk:** API responses, logs, error messages, or public repository files expose passwords, tokens, file contents, or secrets.
+### T6. Unauthorized uploads and malicious files
 
-**Existing protections:**
-- Password hashing.
-- Administrator permission listings are intended to expose permission metadata rather than file contents.
-- Git ignore rules are intended to exclude private environment files, databases, and uploaded files.
+**Threat:** An attacker uploads oversized, unexpected, or malicious files, or uses filenames to attempt path traversal.
 
-**Remaining risks and actions:**
-- Never return password hashes or authentication secrets in API responses.
-- Avoid logging tokens, passwords, and document contents.
-- Check repository history for accidentally committed secrets.
-- Restrict audit-log access and review the information returned by administrator endpoints.
+**Impact:** Resource exhaustion, unsafe file handling, or unauthorized file access.
 
-### Threat 8: Database or storage compromise
+**Mitigation:** Validate file size and type, generate safe server-side storage names, prevent user-controlled paths from escaping the storage directory, and apply suitable storage isolation.
 
-**Risk:** An attacker obtains direct access to the database, uploaded files, or audit checkpoint files.
+**Verification needed:** Inspect upload validation and storage code and test oversized files, unusual filenames, and unauthorized downloads.
 
-**Existing protections:**
-- UUID-based stored filenames.
-- Application-level authorization for protected operations.
+### T7. Audit trail tampering or incomplete records
 
-**Remaining risks and actions:**
-- Application authorization does not protect files from an attacker who already has direct filesystem access.
-- Apply least-privilege filesystem and database permissions.
-- Protect backups and production storage.
-- Use appropriate encryption and recovery procedures for sensitive deployments.
+**Threat:** Users alter audit records, or important events—including denied access attempts—are not recorded.
 
-### Threat 9: Denial of service
+**Impact:** Investigations become unreliable, and suspicious activity may go undetected.
 
-**Risk:** Repeated login attempts, large uploads, expensive searches, or excessive requests consume application resources.
+**Mitigation:** Restrict audit-write operations to trusted server code, record relevant successful and denied actions, and protect audit records against unauthorized modification. If hash chaining or signed checkpoints are used, verify the integrity checks and signing-key protection.
 
-**Existing protections:**
-- Login rate limiting.
-- Upload size restrictions.
-- Bounded pagination on the documented administrator list endpoints.
+**Limitation:** A hash chain alone does not prevent an attacker who controls the database and signing key from rewriting history. Independent protection of keys and copies of audit evidence may be required.
 
-**Remaining risks and actions:**
-- Apply request limits to other expensive endpoints.
-- Configure server-level timeouts and resource limits.
-- Consider reverse-proxy rate limiting and monitoring.
-- Test behavior under repeated requests and concurrent uploads.
+**Verification needed:** Test event coverage, denied-action logging, integrity verification, and attempts to modify audit records.
 
-## 5. Security Testing Strategy
+### T8. Permission-check bypass through alternate endpoints
 
-The project should test both allowed and denied operations.
+**Threat:** A protected document is inaccessible through one endpoint but can be retrieved through search, metadata, download, sharing, or another API route.
 
-Important test cases include:
+**Impact:** Confidentiality or integrity failure despite apparently correct primary access checks.
 
-- Unauthenticated requests to protected endpoints are rejected.
-- A viewer cannot access an unshared document.
-- One user cannot read, download, edit, or delete another user's private document.
-- A non-owner cannot grant or revoke document permissions.
-- Revoked permissions stop allowing access.
-- Inactive accounts cannot access protected functionality.
-- Non-admin users cannot access administrator endpoints.
-- Invalid and oversized uploads are rejected.
-- Denied security-sensitive operations are audited.
-- Audit-chain verification detects altered audit records.
-- Invalid or outdated checkpoints are rejected where required.
-- Tests fail when an authorization check is deliberately weakened.
+**Mitigation:** Centralize or consistently apply authorization checks across all document-related endpoints. Avoid returning sensitive document metadata to unauthorized users.
 
-Run the automated test suite with:
+**Verification needed:** Run negative authorization tests against every endpoint that returns or changes document-related information.
 
-```powershell
-python -m pytest -q
-```
+### T9. Injection and unsafe input handling
 
-Passing tests provide evidence for the tested cases only; they do not prove the absence of all vulnerabilities.
+**Threat:** Malicious input in search terms, metadata, filenames, or request bodies causes injection or unsafe processing.
 
-## 6. Security Assumptions
+**Impact:** Data disclosure, data corruption, or application errors.
 
-- The application host and Python runtime are trusted.
-- Application secrets are configured securely.
-- The database and file storage are not publicly exposed.
-- Administrators are authorized and protect their credentials.
-- Production traffic uses an appropriately secured network connection.
+**Mitigation:** Use parameterized database operations, validate input types and lengths, and safely render user-provided content in the frontend.
 
-If these assumptions fail, application-level checks may not be sufficient.
+**Verification needed:** Inspect database access and frontend rendering code; test malformed and unexpected input.
 
-## 7. Known Limitations
+### T10. Deployment and configuration exposure
 
-- SQLite is suitable for local development but may not be the preferred database for a multi-user production deployment.
-- Basic file-signature validation is not a substitute for malware scanning.
-- Hash-chain verification and signed checkpoints provide tamper-evidence, not absolute protection against a compromised host or stolen signing secret.
-- Production deployment, backup recovery, monitoring, and operational security must be independently configured and verified.
-- Features and mitigations listed as existing protections must be checked against the current code and tests before making a security assurance.
+**Threat:** Debug endpoints, secrets, development databases, permissive CORS settings, or insecure storage are exposed in production.
 
-## 8. Responsible Security Review
+**Impact:** Account compromise, data loss, or disclosure of private documents.
 
-Security testing should be performed only against systems and data that the tester is authorized to access. Use test accounts and non-sensitive sample documents during demonstrations.
+**Mitigation:** Keep secrets in deployment environment variables, disable unnecessary debug access, configure HTTPS and CORS appropriately, and use persistent, access-controlled storage and backups.
+
+**Verification needed:** Inspect the live deployment configuration and verify that the database and uploaded files persist across restarts.
+
+## 5. Security Test Plan
+
+The following tests should be run before claiming the application is secure:
+
+- User A cannot read or download User B's private documents.
+- User A cannot edit or delete User B's documents without explicit permission.
+- A viewer cannot perform editor-only operations.
+- Revoking a grant immediately removes the affected access.
+- Users cannot grant themselves access through access-request endpoints.
+- Users cannot approve or reject requests outside their authority.
+- Search and metadata endpoints do not disclose inaccessible documents.
+- Failed authorization attempts are recorded in the audit trail where required.
+- Audit integrity verification detects unauthorized changes within its stated threat model.
+- Invalid or unauthenticated requests cannot access protected endpoints.
+
+Record actual test results separately. Do not describe a test as passing until it has been executed.
+
+## 6. Known Limitations and Residual Risks
+
+The presence of an authorization function or audit mechanism does not prove that every endpoint uses it correctly. Security depends on complete endpoint coverage, correct database scoping, safe file storage, and deployment configuration.
+
+This document is a threat model, not an independent security audit. Any untested mitigation, deployment control, or automated test must remain explicitly unverified.
+
+## 7. Review
+
+Update this file when new endpoints, roles, storage mechanisms, or permission workflows are introduced. Revisit the threat model after security tests reveal new attack paths.
